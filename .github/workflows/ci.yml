@@ -1,0 +1,109 @@
+name: CI
+
+# ⚠️ **main 이 곧 프로덕션이다.** MCP 등록이 `uvx --from git+…`(태그 없이 HEAD)를 쓰므로
+#    main 에 푸시하는 즉시 모든 클라이언트의 다음 기동에 반영된다. 되돌릴 유예가 없다.
+#    따라서 이 워크플로는 "테스트 통과"가 아니라 **"클라이언트가 실제로 띄울 수 있는가"** 를 본다.
+on:
+  push:
+    branches: [main]
+    paths-ignore: ["README.md", "docs/**"]
+  pull_request:
+
+permissions:
+  contents: read     # 테스트만 하므로 읽기 권한이면 충분하다
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install uv
+        # ⚠️ **정확한 버전 고정** — astral-sh/setup-uv 는 v8 부터 **이동 메이저 태그를 내지
+        #    않는다**(자매 저장소가 2026-09-07 에 실측 확인). `@v10` 으로 쓰면 액션 해석이
+        #    실패한다. actions/* 는 이동 태그를 유지하므로 메이저만 써도 된다 —
+        #    **두 정책이 다르다는 것이 요점이다. 한쪽 관행을 다른 쪽에 이식하지 말 것.**
+        uses: astral-sh/setup-uv@v10.0.1
+
+      - name: Sync (dev)
+        run: uv sync
+
+      - name: Run tests
+        run: uv run pytest -q
+
+      # ── 자격증명·잔여물이 저장소에 들어가지 않았는지 ─────────────────────────
+      - name: 비밀·산출 파일이 추적되지 않는지 확인
+        run: |
+          bad=$(git ls-files | grep -E '(^|/)\.env$|settings\.local\.json$|^probe-out/|^output/' || true)
+          if [ -n "$bad" ]; then
+            echo "::error::비밀/잔여 파일이 추적되고 있다: $bad"; exit 1
+          fi
+          echo "OK: .env·settings.local.json·probe-out·output 미추적"
+
+      - name: 공개 픽스처에 인증키가 남지 않았는지
+        # 🔴 KOSIS 인증키는 진짜 비밀값이다(법제처 OC 와 다르다). 픽스처는 응답만 담고
+        #    응답에는 키가 실리지 않지만, 그 사실에 기대지 말고 형태로도 막는다.
+        run: |
+          hits=$(grep -rEho 'apiKey=[A-Za-z0-9+/=]{8,}' tests/fixtures/ 2>/dev/null || true)
+          if [ -n "$hits" ]; then
+            echo "::error::픽스처에 인증키로 보이는 값이 있다"; exit 1
+          fi
+          echo "OK: 픽스처에 인증키 없음"
+
+      # ── 아래 두 단계가 @HEAD 운영의 실제 안전망이다 ──────────────────────────
+      # uv.lock 은 개발용이고 클라이언트 경로(uvx --from git+…)는 **lock 을 보지 않는다**.
+      # 따라서 lock 이 고정해둔 버전이 아니라 **신규 해석 결과**로 검사해야 의미가 있다.
+      - name: 신규 해석에서 mcp 1.x 확인 (fastmcp 존재)
+        # 실제 사고(자매 프로젝트 kci·scienceon·nl): 상한 없는 `mcp>=1.2.0` 이 2.0 으로 해석돼
+        # mcp.server.fastmcp 가 사라졌고 uvx 기동이 ModuleNotFoundError 로 죽었다.
+        # lock 에는 1.x 가 박혀 있어 pytest 는 멀쩡했다 — 그래서 별도 검사가 필요하다.
+        run: |
+          uv run --no-project --with . python -c "import mcp.server.fastmcp; print('mcp.server.fastmcp OK')"
+
+      - name: 콜드 스타트 스모크 (클라이언트와 동일 경로 · 핸드셰이크 + 도구 노출)
+        # ⚠️ stdin 을 곧바로 닫으면 서버가 **응답을 내보내기 전에** EOF 로 종료해 버린다
+        #    (자매 저장소에서 관측된 경합). `sleep` 으로 stdin 을 잠깐 열어둔다.
+        # ⚠️ OC 없이 돈다 — 기동·도구 노출만 보고 API 왕복은 하지 않는다.
+        run: |
+          { printf '%s\n' \
+              '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"ci","version":"1"}}}' \
+              '{"jsonrpc":"2.0","method":"notifications/initialized"}' \
+              '{"jsonrpc":"2.0","id":2,"method":"tools/list"}'
+            sleep 5
+          } | uvx --from . kosis-mcp > smoke.jsonl || true
+
+          echo "--- 서버 응답 ---"
+          cat smoke.jsonl
+          echo "-----------------"
+
+          grep -q '"serverInfo"' smoke.jsonl \
+            || { echo "::error::MCP handshake 실패 — 클라이언트가 이 커밋으로 기동할 수 없다"; exit 1; }
+          for t in kosis_status kosis_guide kosis_search kosis_list kosis_meta kosis_explain kosis_data kosis_citation kosis_collect; do
+            grep -q "\"$t\"" smoke.jsonl || { echo "::error::도구 $t 가 노출되지 않았다"; exit 1; }
+          done
+          echo "handshake + tools 9종 OK"
+
+      - name: CLI 기동 확인 (OC 없이도 안내로 끝나야 한다)
+        # 🔴 자매 저장소의 적대적 리뷰가 잡은 결함 — CLI 가 인증값 없을 때 raw traceback
+        #    으로 죽었다. MCP 도구는 dict 를 돌려주는데 CLI 만 달랐다. 회귀로 고정한다.
+        # ⚠️ 변수를 **빈 값으로 설정**한다(unset 이 아니라). `config` 가 `.env` 를 로드하므로
+        #    unset 만으로는 .env 가 있는 환경에서 무력해진다.
+        env:
+          KOSIS_API_KEY: ""
+          KOSIS_KEY: ""
+        run: |
+          set +e
+          fail=0
+          run_one() { out=$("$@" 2>&1); echo "$out" | grep -q "Traceback" \
+            && { echo "::error::$* 가 traceback 으로 죽는다"; echo "$out"; fail=1; }; }
+          run_one uv run kosis status
+          run_one uv run kosis guide
+          run_one uv run kosis search 교육
+          run_one uv run kosis data --org 101 --tbl DT_1PE201 --prd Y --recent 1
+          [ "$fail" = 0 ] || exit 1
+          echo "CLI 무인증 기동 OK"
+
+      - name: 문서에 없는 세 가지가 코드에 남아 있는지
+        # 🔴 jsonVD · /Param/ 경로 · 인증키 무가공 — 이 셋이 이 API 의 전부다.
+        run: |
+          uv run pytest -q tests/test_kosis.py -k "jsonvd or param_endpoint or err31 or no_data"

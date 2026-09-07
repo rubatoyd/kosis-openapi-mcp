@@ -1,0 +1,38 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.rubatoyd/kosis-openapi-mcp",
+  "description": "Korean official statistics (KOSIS) — tables, metadata and observations",
+  "version": "0.1.0",
+  "repository": {
+    "url": "https://github.com/rubatoyd/kosis-openapi-mcp",
+    "source": "github"
+  },
+  "websiteUrl": "https://github.com/rubatoyd/kosis-openapi-mcp",
+  "packages": [
+    {
+      "registryType": "mcpb",
+      "identifier": "https://github.com/rubatoyd/kosis-openapi-mcp/releases/download/v0.1.0/kosis-openapi-mcp.mcpb",
+      "version": "0.1.0",
+      "transport": {
+        "type": "stdio"
+      },
+      "fileSha256": "__MCPB_SHA256__",
+      "environmentVariables": [
+        {
+          "name": "KOSIS_API_KEY",
+          "description": "KOSIS OpenAPI key from kosis.kr (sign up, then request API access — auto-approved). Use the issued value verbatim; it looks like base64 but must not be decoded. Required.",
+          "isRequired": true,
+          "isSecret": true,
+          "format": "string"
+        },
+        {
+          "name": "KOSIS_OS_TRUST",
+          "description": "Use the OS trust store for TLS (1=on, default). Set 0 to disable. Needed on school/corporate networks that intercept SSL.",
+          "isRequired": false,
+          "isSecret": false,
+          "format": "string"
+        }
+      ]
+    }
+  ]
+}
