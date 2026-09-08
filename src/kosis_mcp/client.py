@@ -268,16 +268,23 @@ class KosisClient:
                                 "obj_levels": None, "obj_note": None}
         rows: list[dict] = []
 
+        empty = False
         if recent and not (start and end):
             # 최근 N개 시점 — 쪼갤 축이 없으므로 초과하면 N 을 줄이라고 알린다.
             try:
                 rows = self._fetch(base | {"newEstPrdCnt": str(int(recent))}, meta, state)
+            except NoData:
+                # 🔴 0건은 실패가 아니다. 기간 모드는 `_fetch_range` 가 이것을 삼켜
+                #    0건으로 돌려주는데 여기서만 예외로 새어 나갔다 — 같은 조건에
+                #    같은 답을 줘야 부르는 쪽이 ⚠ 와 '0건'을 가릴 수 있다.
+                rows, empty = [], True
             except TooManyCells:
                 raise KosisError(
                     f"요청이 4만 셀 제한을 넘습니다(err 31). `recent={recent}` 를 줄이거나, "
                     f"`start`/`end` 로 기간을 주면 이 도구가 자동으로 쪼갭니다.") from None
         else:
             rows = self._fetch_range(base, str(start), str(end), meta, state)
+            empty = bool(meta["chunks"]) and all(ch.get("no_data") for ch in meta["chunks"])
 
         meta["obj_levels"] = {"objL1": obj_l1, **state["levels"]}
         if state["escalated"]:
@@ -285,6 +292,17 @@ class KosisClient:
                 f"이 표는 분류축이 {len(state['levels']) + 1}개입니다 — "
                 f"err 20(objL)을 보고 자동으로 {', '.join(state['levels'])} 를 "
                 f"'ALL' 로 채워 받았습니다. 축을 좁히려면 obj_l2~obj_l8 에 코드를 주세요.")
+
+        # 🔴 0건이면 **그 사실을 말한다.** 조용히 빈 목록을 주면 부르는 쪽이 실패와
+        #    구분하지 못한다. 게다가 통계자료의 0건은 원인이 둘이고 응답으로는 갈리지
+        #    않는다 — 정말 자료가 없거나, 개발가이드가 말하는 **라이선스 제약 자료**
+        #    (국제통계 등)라 서비스에서 제외됐거나. 둘 다 err 30 으로 온다.
+        if empty and not rows:
+            meta["no_data"] = True
+            meta["note"] = (
+                "조회 결과가 없습니다(err 30) — 오류가 아닙니다. 시점·분류·항목 조건에 "
+                "자료가 없거나, 라이선스 제약 자료(국제통계 등)라 통계자료 서비스에서 "
+                "제외된 표일 수 있습니다. 응답만으로는 둘이 구분되지 않습니다.")
 
         obs = [observation_from_row(r) for r in rows]
         meta["total"] = len(obs)

@@ -593,3 +593,53 @@ def test_bigdata_probe_does_not_break_status_when_it_fails_oddly():
             return []
     info = C(api_key="x", throttle=0).status()
     assert info["ok"] is True and info["bigdata"]["available"] is None
+
+
+# ── 통계자료의 0건은 원인이 둘인데 응답으로 갈리지 않는다 ────────────────────
+def test_data_zero_rows_names_both_causes():
+    """🔴 라이선스 제외(국제통계 등)와 '정말 0건'이 **둘 다 err 30** 으로 온다.
+
+    개발가이드: "통계자료와 대용량 통계자료는 국제통계 등 라이선스 제약에 해당되는
+    자료는 서비스 제외". 응답으로 구분할 수단이 없으므로 한쪽만 말하면 사용자가
+    엉뚱한 곳을 뒤진다 — 두 가능성을 다 적는다.
+    """
+    class C(KosisClient):
+        def _get(self, url, params, *, what):
+            raise NoData("조회 결과가 없습니다")
+    obs, meta = C(api_key="x", throttle=0).data(
+        "101", "T", prd_se="Y", start="1900", end="1900")
+    assert obs == [] and meta["total"] == 0
+    assert meta["no_data"] is True
+    assert "오류가 아닙니다" in meta["note"]
+    assert "라이선스" in meta["note"], "제외 가능성을 알려 줘야 한다"
+
+
+def test_partial_no_data_is_not_reported_as_a_whole_miss():
+    """일부 구간만 비었으면 0건이 아니다 — no_data 를 달면 안 된다."""
+    class C(KosisClient):
+        def _get(self, url, params, *, what):
+            s, e = params["startPrdDe"], params["endPrdDe"]
+            if s != e:                       # 전 구간 요청은 쪼개게 만든다
+                raise TooManyCells("초과")
+            if s == "2020":
+                raise NoData("없음")
+            return [{"TBL_ID": "T", "PRD_DE": s, "PRD_SE": "Y", "DT": "1"}]
+    obs, meta = C(api_key="x", throttle=0).data(
+        "101", "T", prd_se="Y", start="2020", end="2021")
+    assert meta["total"] == 1, "빈 구간과 찬 구간이 섞이면 찬 쪽이 남아야 한다"
+    assert not meta.get("no_data"), "일부만 비었는데 전부 0건이라 하면 안 된다"
+    assert any(ch.get("no_data") for ch in meta["chunks"]), "빈 구간은 기록에 남는다"
+
+
+def test_recent_mode_reports_zero_rows_instead_of_raising():
+    """🔴 기간 모드는 0건으로 돌려주는데 `recent` 모드만 **예외로 새어 나갔다.**
+
+    같은 사실(err 30)에 한쪽은 '0건', 한쪽은 '실패'라고 답하면 부르는 쪽이 ⚠ 를
+    띄울지 '없음'을 띄울지 고를 수 없다. 이 저장소가 지키는 구분이 거기서 깨진다.
+    """
+    class C(KosisClient):
+        def _get(self, url, params, *, what):
+            raise NoData("조회 결과가 없습니다")
+    obs, meta = C(api_key="x", throttle=0).data("101", "T", prd_se="Y", recent=1)
+    assert obs == [] and meta["total"] == 0 and meta["no_data"] is True
+    assert "라이선스" in meta["note"]
