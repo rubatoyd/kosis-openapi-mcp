@@ -157,7 +157,7 @@ def cmd_data(args) -> int:
 def cmd_collect(args) -> int:
     obs, meta = _data(args)
     paths = export(obs, [f.strip() for f in args.format.split(",") if f.strip()],
-                   args.out_dir, args.name)
+                   args.out_dir, args.name, kind="observation")
     print(f"{len(obs):,}행 수집 · API 호출 {meta['requests']}회")
     for p in paths:
         print(f"  저장: {p}")

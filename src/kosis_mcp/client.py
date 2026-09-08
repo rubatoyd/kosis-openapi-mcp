@@ -38,7 +38,15 @@ log = logging.getLogger("kosis_mcp")
 
 
 class KosisError(RuntimeError):
-    """네트워크·HTTP·파싱을 아우르는 클라이언트 오류 (인증키는 절대 싣지 않는다)."""
+    """네트워크·HTTP·파싱을 아우르는 클라이언트 오류 (인증키는 절대 싣지 않는다).
+
+    ⚠️ KOSIS 오류코드를 `code` 로 **보존한다.** 문구만 남기면 부르는 쪽이 원인을
+       문자열 검색으로 알아내야 하고, 문구가 바뀌는 순간 조용히 어긋난다.
+    """
+
+    def __init__(self, message: str, *, code: str | None = None):
+        self.code = code
+        super().__init__(message)
 
 
 class KosisClient:
@@ -124,7 +132,7 @@ class KosisClient:
                         continue
                     except ApiError as e:
                         if not e.retryable:
-                            raise KosisError(str(e)) from None
+                            raise KosisError(str(e), code=e.code) from None
                         last = e
                     except ParseError as e:
                         raise KosisError(str(e)) from None
@@ -368,7 +376,40 @@ class KosisClient:
         except Exception as e:  # noqa: BLE001
             info["ok"] = False
             info["note"] = scrub(f"{type(e).__name__}: {e}")
+            return info
+        info["bigdata"] = self._bigdata_probe()
         return info
+
+    def _bigdata_probe(self) -> dict:
+        """대용량 서비스에 이 키가 승인돼 있는가.
+
+        🔴 **인증이 서비스별로 갈린다.** 다른 서비스가 전부 정상인 키가 대용량에서만
+           `err 11`(유효하지않은 인증KEY)을 받는다 — `method` 조차 없는 요청에도
+           같은 답이 오므로 파라미터 검증 **이전에** 키가 거부되는 것이다(실측).
+
+        이것을 여기서 재 두는 이유: 이 상태로 err 11 만 보면 **키를 의심하게 되고**
+        멀쩡한 키를 재발급하러 간다. 방향이 반대라는 것을 알려 줘야 한다.
+        ⚠️ 대용량은 오류를 **XML** 로 준다 — `format=json` 을 줘도 그렇다.
+        """
+        try:
+            self._get(ENDPOINTS["bigdata"],
+                      {"method": "getList", "orgId": "101", "tblId": "DT_1B040A3",
+                       "prdSe": "Y", "startPrdDe": "2020", "endPrdDe": "2020",
+                       "objL1": "ALL", "itmId": "ALL"},
+                      what="대용량 서비스 점검")
+        except KosisError as e:
+            if e.code == "11":
+                return {"available": False, "reason": "err 11",
+                        "note": "이 인증키는 대용량 서비스에 승인돼 있지 않습니다 — "
+                                "🔴 키가 잘못된 것이 아닙니다(다른 서비스는 정상). "
+                                "kosis.kr 에서 대용량 서비스 활용신청을 따로 하세요. "
+                                "이 저장소의 도구들은 대용량을 쓰지 않으므로 영향이 없습니다."}
+            return {"available": False, "reason": f"err {e.code or '?'}",
+                    "note": scrub(str(e))}
+        except Exception as e:  # noqa: BLE001
+            return {"available": None, "reason": type(e).__name__,
+                    "note": "점검하지 못했습니다(대용량은 이 저장소가 쓰지 않습니다)."}
+        return {"available": True, "note": "대용량 서비스도 이 키로 접근됩니다."}
 
 
 # ── 기간 계산 ───────────────────────────────────────────────────────────────

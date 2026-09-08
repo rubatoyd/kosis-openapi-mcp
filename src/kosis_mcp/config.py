@@ -33,7 +33,14 @@ ENDPOINTS = {
     "list":    f"{BASE}/statisticsList.do",      # 통계목록
     "data":    f"{BASE}/statisticsData.do",      # 통계자료 (+ method=getMeta 로 메타자료)
     "meta":    f"{BASE}/statisticsData.do",      # 메타자료 — 같은 URL, method=getMeta
-    "bigdata": f"{BASE}/statisticsBigData.do",   # 대용량 통계자료
+    # 🔴 **대용량은 인증이 따로 논다** — 같은 키가 다른 서비스에서는 전부 정상인데
+    #    여기서만 `err 11`(유효하지않은 인증KEY)이다. `method` 조차 없는 요청에도
+    #    같은 답이 오므로 **파라미터 검증 이전에 키가 거부**되는 것이고, 곧 키가
+    #    이 서비스에 대해 승인돼 있지 않다는 뜻이다(2026-09-08 실측, 5가지 조합).
+    #    ⚠️ 오류가 항상 **XML** 로 온다 — `format=json&jsonVD=Y` 를 줘도 그렇다.
+    #    ⚠️ `/openapi/Param/statisticsBigData.do` 는 404 다(Param 경로는 파라미터 방식 전용).
+    #    → 어느 도구도 이 엔드포인트를 쓰지 않는다. `status()` 가 접근 가능 여부만 알린다.
+    "bigdata": f"{BASE}/statisticsBigData.do",   # 대용량 통계자료 (별도 활용신청 필요)
     "expl":    f"{BASE}/statisticsExplData.do",  # 통계설명
     "explain": "https://kosis.kr/openApi/StatsExplain.do",   # ⚠️ openApi (대문자 A)
     "search":  f"{BASE}/statisticsSearch.do",    # KOSIS 통합검색
@@ -81,7 +88,10 @@ PERIODS = {"Y": "년", "H": "반기", "Q": "분기", "M": "월", "D": "일", "IR
 ERROR_CODES = {
     "10": "인증키 누락 — KOSIS_API_KEY 를 설정하세요.",
     "11": "인증키가 유효하지 않거나 기간이 만료됐습니다. "
-          "🔴 발급된 값을 **그대로** 쓰고 있는지 확인하세요(base64 처럼 보여도 디코드 금지).",
+          "🔴 발급된 값을 **그대로** 쓰고 있는지 확인하세요(base64 처럼 보여도 디코드 금지). "
+          "⚠️ 다른 서비스는 되는데 **대용량(statisticsBigData.do)에서만** 이 오류라면 "
+          "키가 잘못된 것이 아니라 그 서비스에 대한 활용신청이 따로 필요한 것입니다"
+          "(실측 — 인증이 서비스별로 갈립니다).",
     "20": "필수요청변수 누락 — 원인이 둘입니다(실측). "
           "① 통계자료를 orgId/tblId 로 부를 때는 "
           "`/openapi/Param/statisticsParameterData.do` 를 써야 합니다 — "

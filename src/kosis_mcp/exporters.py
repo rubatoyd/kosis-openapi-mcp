@@ -58,13 +58,19 @@ def extra_columns(records: Sequence) -> list[str]:
     return list(seen)
 
 
-def _table(records: Sequence) -> tuple[list[str], list[dict]]:
+def _table(records: Sequence, *, kind: str | None = None) -> tuple[list[str], list[dict]]:
     """열 머리와 행들. 관측치와 통계표를 둘 다 받는다.
 
     ⚠️ 관측치는 **분류 축이 표마다 다르다** — 고정 열 뒤에 실제로 나온 분류 이름을
        열로 붙인다. 고정 스키마를 강요하면 분류가 통째로 사라진다.
+
+    ⚠️ **레코드가 0건이면 종류를 알 수 없다.** 첫 원소로 판별하던 탓에 빈 관측치를
+       내보내면 통계표 열 머리(`tbl_id, org_nm, stat_nm …`)가 찍혀 나갔다 — 받는
+       쪽이 스키마를 오해한다. 그래서 부르는 쪽이 `kind` 로 알려 준다.
+       0건은 실패가 아니라 사실이므로(err 30) 파일 자체는 정상적으로 쓴다.
     """
-    if records and isinstance(records[0], Observation):
+    if kind == "observation" or (kind is None and records
+                                 and isinstance(records[0], Observation)):
         seen: dict[str, None] = {}
         for r in records:
             for k in r.classes:
@@ -87,8 +93,11 @@ def _table(records: Sequence) -> tuple[list[str], list[dict]]:
     return header, rows
 
 
-def to_json(records: Sequence, path: str) -> None:
-    """정규화 행 + 원본 필드(raw) + (통계표라면) 서지 매핑을 함께 저장."""
+def to_json(records: Sequence, path: str, *, kind: str | None = None) -> None:
+    """정규화 행 + 원본 필드(raw) + (통계표라면) 서지 매핑을 함께 저장.
+
+    json 은 행 목록이라 빈 목록이 스키마를 오해시키지 않는다 — `kind` 는 받기만 한다.
+    """
     data = []
     for r in records:
         item = {**r.to_row(), "raw": r.raw}
@@ -100,18 +109,18 @@ def to_json(records: Sequence, path: str) -> None:
                           encoding="utf-8")
 
 
-def to_csv(records: Sequence, path: str) -> None:
-    header, rows = _table(records)
+def to_csv(records: Sequence, path: str, *, kind: str | None = None) -> None:
+    header, rows = _table(records, kind=kind)
     with open(path, "w", newline="", encoding="utf-8-sig") as f:  # 엑셀 한글 호환 BOM
         w = csv.DictWriter(f, fieldnames=header, extrasaction="ignore")
         w.writeheader()
         w.writerows(rows)
 
 
-def to_xlsx(records: Sequence, path: str) -> None:
+def to_xlsx(records: Sequence, path: str, *, kind: str | None = None) -> None:
     from openpyxl import Workbook
 
-    header, rows = _table(records)
+    header, rows = _table(records, kind=kind)
     wb = Workbook()
     ws = wb.active
     ws.title = "records"
@@ -134,8 +143,9 @@ def _cell(value: str) -> str:
     return s[:keep] + f"…[{len(s):,}자 중 잘림 — 전문은 json 참조]"
 
 
-def to_sqlite(records: Sequence, path: str, *, table: str = "records") -> None:
-    header, rows = _table(records)
+def to_sqlite(records: Sequence, path: str, *, table: str = "records",
+              kind: str | None = None) -> None:
+    header, rows = _table(records, kind=kind)
     con = sqlite3.connect(path)
     try:
         cols = ", ".join(f'"{c}" TEXT' for c in header)
@@ -158,8 +168,11 @@ _EXT = {"json": ".json", "csv": ".csv", "xlsx": ".xlsx", "sqlite": ".sqlite"}
 
 
 def export(records: Sequence, formats: Sequence[str] | str, out_dir: str,
-           name: str) -> list[str]:
+           name: str, *, kind: str | None = None) -> list[str]:
     """formats 각각으로 out_dir/name.* 저장. 저장된 경로 목록 반환.
+
+    `kind` 는 `"observation"` 또는 `"table"` — **0건일 때 열 머리를 고르는 유일한
+    근거다.** 첫 원소로 판별하면 빈 관측치가 통계표 스키마로 나간다.
 
     🔴 **쓰기 전에 형식을 전부 검증한다.** 쓰기 루프 안에서 검증하면
        `['json','bogus']` 가 json 을 쓴 뒤 예외를 내 — 수집 메타가 통째로 사라지고
@@ -188,6 +201,6 @@ def export(records: Sequence, formats: Sequence[str] | str, out_dir: str,
         p = (out / f"{stem}{_EXT[key]}").resolve()
         if base != p.parent:      # 정규화를 뚫는 경로가 남아 있으면 멈춘다(이중 방어)
             raise ValueError(f"출력 경로가 지정 디렉터리를 벗어납니다: {p}")
-        _EXPORTERS[key](records, str(p))
+        _EXPORTERS[key](records, str(p), kind=kind)
         paths.append(str(p))
     return paths
