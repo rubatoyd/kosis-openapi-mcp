@@ -2,6 +2,9 @@
 .env
 .claude/settings.local.json
 
+# 배포 자료(개발가이드 PDF 등) — 저장소에 넣지 않는다
+ref/
+
 # 산출물
 output/
 probe-out/

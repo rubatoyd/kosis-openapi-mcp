@@ -103,6 +103,25 @@ jobs:
           [ "$fail" = 0 ] || exit 1
           echo "CLI 무인증 기동 OK"
 
+      - name: 배포 매니페스트가 실제 도구 목록과 어긋나지 않는지
+        # ⚠️ 매니페스트는 릴리스 때만 쓰여 평소에 아무도 보지 않는다 — 도구가 늘거나
+        #    이름이 바뀌면 조용히 어긋난 채로 레지스트리에 올라간다. 여기서 붙든다.
+        run: |
+          uv run python - <<'PY'
+          import json, re, pathlib
+          src = pathlib.Path("src/kosis_mcp/server.py").read_text(encoding="utf-8")
+          tools = set(re.findall(r"^def (kosis_\w+)", src, re.M))
+          fail = False
+          for p in ("mcpb/manifest.json", "packaging/binary/manifest.json"):
+              listed = {t["name"] for t in json.loads(pathlib.Path(p).read_text(encoding="utf-8"))["tools"]}
+              if listed != tools:
+                  print(f"::error::{p} 의 도구 목록이 어긋난다 — "
+                        f"빠짐={sorted(tools - listed)} 남음={sorted(listed - tools)}")
+                  fail = True
+          raise SystemExit(1 if fail else 0)
+          PY
+          echo "매니페스트 · 도구 목록 일치 OK"
+
       - name: 문서에 없는 세 가지가 코드에 남아 있는지
         # 🔴 jsonVD · /Param/ 경로 · 인증키 무가공 — 이 셋이 이 API 의 전부다.
         run: |
