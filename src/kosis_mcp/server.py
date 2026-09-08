@@ -46,6 +46,7 @@ def _safe(fn):
 _READ = {"readOnlyHint": True, "openWorldHint": True}
 _WRITE = {"readOnlyHint": False, "destructiveHint": False, "openWorldHint": True}
 
+
 def _obj_levels(*values: str) -> dict[str, str]:
     """obj_l2~obj_l8 → {'objL2': …} — **빈 값은 싣지 않는다.**
 
@@ -159,10 +160,14 @@ def kosis_list(vw_cd: str = "MT_ZTITLE", parent_id: str = "") -> dict:
 @mcp.tool(annotations=_READ)
 @_safe
 def kosis_meta(org_id: str, tbl_id: str, kind: str = "TBL") -> dict:
-    """통계표의 메타자료 — 항목(ITM)·분류(NCD)·주기(PRD)·출처(SOURCE) 등.
+    """통계표의 메타자료 — 항목(ITM)·수록기간(PRD)·출처(SOURCE)·주석(CMMT) 등.
 
     ⚠️ `kosis_data` 를 부르기 전에 **ITM 으로 항목 ID 를, PRD 로 수록주기를** 확인하면
        err 20/21 을 피할 수 있다.
+    🔴 **분류축을 알려 주는 종류는 없다.** `NCD` 는 분류가 아니라 신규수록 시점이고
+       `OBJ`·`CLS` 는 err 30 이다(실측) — 축은 `kosis_data` 가 알아서 맞춘다.
+    ⚠️ 없는 `kind` 는 err 21 이 아니라 err 30(0건)으로 오므로 오타가 '자료 없음'처럼
+       보인다. 그래서 아는 종류만 받는다 — 가능한 값은 `kosis_guide` 의 `메타_종류`.
     """
     if not get_api_key():
         return _NO_KEY
@@ -280,7 +285,9 @@ def kosis_collect(org_id: str, tbl_id: str, prd_se: str, out_dir: str,
                             obj_levels=_obj_levels(obj_l2, obj_l3, obj_l4, obj_l5,
                                                    obj_l6, obj_l7, obj_l8),
                             items=items, max_rows=10 ** 9)
-    paths = export(obs, formats or ["xlsx", "json"], out_dir, name)
+    # kind 를 준다 — 0건이어도 관측치 열 머리로 나가야 한다(빈 파일도 계약이다).
+    paths = export(obs, formats or ["xlsx", "json"], out_dir, name,
+                   kind="observation")
     return {"saved": paths, "count": len(obs), "meta": meta}
 
 

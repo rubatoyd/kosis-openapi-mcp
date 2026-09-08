@@ -6,14 +6,15 @@ KOSIS 는 모든 실패를 HTTP 200 으로 주므로 '예외가 안 났다'는 �
 from __future__ import annotations
 
 import json
+import pathlib
 
 import pytest
 
 from kosis_mcp.client import KosisClient, KosisError, _midpoint, _next_period
 from kosis_mcp.config import ERROR_CODES, ENDPOINTS, META_TYPES, scrub
-from kosis_mcp.exporters import _table
+from kosis_mcp.exporters import _table, export
 from kosis_mcp.models import (
-    Observation, Table, clean_text, normalize_period,
+    COLUMNS, OBS_COLUMNS, Observation, Table, clean_text, normalize_period,
     observation_from_row, table_from_row)
 from kosis_mcp.parser import (
     ApiError, MissingObjLevel, NoData, ParseError, RateLimited, TooManyCells,
@@ -511,3 +512,84 @@ def test_meta_type_labels_match_what_the_api_returns():
     """
     assert "분류" not in META_TYPES["NCD"]
     assert META_TYPES["NCD"] == "신규수록 시점"
+
+
+# ── 0건 내보내기가 스키마를 오해시키지 않는다 ───────────────────────────────
+def test_empty_observation_export_keeps_the_observation_schema(tmp_path):
+    """🔴 0건이면 첫 원소로 종류를 알 수 없다 — 관측치가 통계표 열로 나가고 있었다.
+
+    err 30(0건)은 실패가 아니라 사실이므로 파일은 정상적으로 쓰되, **받는 쪽이
+    스키마를 오해하지 않아야** 한다.
+    """
+    header, rows = _table([], kind="observation")
+    assert rows == []
+    assert header[:len(OBS_COLUMNS)] == list(OBS_COLUMNS)
+    assert "org_nm" not in header and "stat_nm" not in header, "통계표 열이 섞이면 안 된다"
+
+    paths = export([], ["csv"], str(tmp_path), "empty", kind="observation")
+    first = pathlib.Path(paths[0]).read_text(encoding="utf-8-sig").splitlines()[0]
+    assert first.split(",")[:4] == ["tbl_id", "tbl_nm", "period", "prd_se"]
+
+
+def test_empty_table_export_still_uses_the_table_schema(tmp_path):
+    header, _ = _table([], kind="table")
+    assert header == list(COLUMNS)
+
+
+def test_kind_is_threaded_from_both_export_callers():
+    """도구·CLI 가 kind 를 넘기지 않으면 이 수정은 무의미하다."""
+    import inspect
+    from kosis_mcp import cli, server
+    for src in (inspect.getsource(getattr(server.kosis_collect, "fn",
+                                          server.kosis_collect)),
+                inspect.getsource(cli.cmd_collect)):
+        assert 'kind="observation"' in src
+
+
+# ── 🔴 대용량(BigData) — 인증이 서비스별로 갈린다 ───────────────────────────
+def test_bigdata_err11_is_diagnosed_as_authorization_not_a_bad_key():
+    """같은 키가 다른 서비스는 전부 정상인데 대용량만 err 11 이다(실측).
+
+    이 상태로 'err 11 = 인증키 무효'만 보여 주면 **멀쩡한 키를 재발급하러 간다.**
+    방향이 반대라는 것을 알려 줘야 한다.
+    """
+    class C(KosisClient):
+        def _get(self, url, params, *, what):
+            if "BigData" in url:
+                raise KosisError("유효하지않은 인증KEY입니다. (코드 11)", code="11")
+            return [{"LIST_ID": "A"}]
+    info = C(api_key="x", throttle=0).status()
+    assert info["ok"] is True, "다른 서비스가 되면 상태는 정상이어야 한다"
+    big = info["bigdata"]
+    assert big["available"] is False and big["reason"] == "err 11"
+    assert "활용신청" in big["note"]
+    assert "키가 잘못된 것이 아닙니다" in big["note"]
+    json.dumps(info, ensure_ascii=False)
+
+
+def test_bigdata_xml_error_envelope_is_parsed():
+    """대용량은 오류를 **XML** 로 준다 — format=json&jsonVD=Y 를 줘도 그렇다(실측)."""
+    body = ('<?xml version="1.0" encoding="UTF-8" ?>'
+            '<error><err>11</err><errMsg>유효하지않은 인증KEY입니다.</errMsg></error>')
+    e = pytest.raises(ApiError, parse, body, what="대용량").value
+    assert e.code == "11"
+
+
+def test_error_code_carries_through_to_kosis_error():
+    """🔴 코드를 문구로만 남기면 부르는 쪽이 문자열 검색을 하게 된다."""
+    class C(KosisClient):
+        pass
+    err = KosisError("x", code="11")
+    assert err.code == "11"
+    assert KosisError("x").code is None
+
+
+def test_bigdata_probe_does_not_break_status_when_it_fails_oddly():
+    """대용량 점검이 실패해도 status 자체는 살아 있어야 한다(이 저장소는 안 쓴다)."""
+    class C(KosisClient):
+        def _get(self, url, params, *, what):
+            if "BigData" in url:
+                raise RuntimeError("무슨 일인가")
+            return []
+    info = C(api_key="x", throttle=0).status()
+    assert info["ok"] is True and info["bigdata"]["available"] is None
