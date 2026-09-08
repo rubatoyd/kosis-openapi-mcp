@@ -20,6 +20,26 @@ from .config import ERROR_CODES, META_TYPES, PERIODS, VIEW_CODES, get_api_key
 from .exporters import export
 
 
+def use_utf8_stdio() -> None:
+    """🔴 Windows 콘솔(cp949)에서 출력이 통째로 죽는 것을 막는다.
+
+    이 CLI 의 출력문에는 `—`·`·`·`📁` 가 섞여 있는데, 파이썬은 Windows 에서 stdout
+    인코딩을 **ANSI 코드페이지(한국어 = cp949)** 로 잡는다. 그래서 `kosis guide`
+    같이 API 를 부르지도 않는 명령까지 이렇게 죽었다(2026-09-08 실측):
+
+        오류: 'cp949' codec can't encode character '\\u2014'
+
+    ⚠️ 게다가 `UnicodeEncodeError` 는 `ValueError` 의 하위라 아래 `except` 에 걸려
+       **인코딩 사고가 API 오류로 둔갑**했다. 원인이 가려지는 쪽이 더 나쁘다.
+    ⚠️ CI 는 ubuntu 에서만 도는 탓에 이것을 못 잡았다 — 회귀로 고정한다.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, ValueError, OSError):
+            pass          # 파이프·캡처 등 재설정할 수 없는 스트림이면 그대로 둔다
+
+
 def _dump(obj) -> None:
     print(json.dumps(obj, ensure_ascii=False, indent=2))
 
@@ -107,11 +127,13 @@ def cmd_explain(args) -> int:
 
 
 def _data(args):
+    levels = {f"objL{i}": v.strip()
+              for i, v in enumerate(args.obj2 or [], start=2) if v.strip()}
     return KosisClient().data(
         args.org, args.tbl, prd_se=args.prd,
         start=args.start or None, end=args.end or None,
-        recent=args.recent or None, obj_l1=args.obj, items=args.items,
-        max_rows=10 ** 9)
+        recent=args.recent or None, obj_l1=args.obj, obj_levels=levels,
+        items=args.items, max_rows=10 ** 9)
 
 
 def cmd_data(args) -> int:
@@ -119,9 +141,11 @@ def cmd_data(args) -> int:
     if args.json:
         _dump({"observations": [o.to_row() for o in obs[:args.limit]], "meta": meta})
         return 0
-    print(f"{meta['total']:,}행 · 요청 {meta['requests']}회")
-    if meta.get("split_note"):
-        print(f"  [!] {meta['split_note']}")
+    print(f"{meta['total']:,}행 · 요청 {meta['requests']}회 "
+          f"· 분류축 {' '.join(meta.get('obj_levels') or {})}")
+    for k in ("obj_note", "split_note"):
+        if meta.get(k):
+            print(f"  [!] {meta[k]}")
     for o in obs[:args.limit]:
         cls = " ".join(f"{v}" for v in o.classes.values())
         print(f"  {o.period:<10} {cls[:28]:<28} {o.item[:14]:<14} {o.value:>14} {o.unit}")
@@ -137,8 +161,9 @@ def cmd_collect(args) -> int:
     print(f"{len(obs):,}행 수집 · API 호출 {meta['requests']}회")
     for p in paths:
         print(f"  저장: {p}")
-    if meta.get("split_note"):
-        print(f"  [!] {meta['split_note']}")
+    for k in ("obj_note", "split_note"):
+        if meta.get(k):
+            print(f"  [!] {meta[k]}")
     return 0
 
 
@@ -185,6 +210,11 @@ def build_parser() -> argparse.ArgumentParser:
         sp.add_argument("--end", default="")
         sp.add_argument("--recent", type=int, default=0)
         sp.add_argument("--obj", default="ALL", help="분류1 — ALL·11·11*·11+21")
+        # 🔴 다축 표(예: 산업 × 규모)를 위한 자리. 비워 두면 클라이언트가 err 20(objL)을
+        #    보고 필요한 만큼 ALL 로 자동으로 채운다 — 보통은 줄 필요가 없다.
+        sp.add_argument("--obj2", action="append", metavar="코드",
+                        help="분류2 이후를 순서대로. 반복하면 objL2, objL3 … "
+                             "(생략하면 자동으로 맞춘다)")
         sp.add_argument("--items", default="ALL")
 
     d = sub.add_parser("data", help="통계표 수치")
@@ -203,6 +233,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    use_utf8_stdio()
     args = build_parser().parse_args(argv if argv is not None else sys.argv[1:])
     if args.cmd != "guide" and not get_api_key():
         print("KOSIS_API_KEY 미설정 — kosis.kr 회원가입 후 공유서비스 활용신청에서 받은 "

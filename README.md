@@ -54,6 +54,8 @@ uv run kosis search 사교육비
 uv run kosis meta --org 101 --tbl DT_1PE201 --kind ITM     # 항목 ID 확인
 uv run kosis data --org 101 --tbl DT_1PE201 --prd Y --start 2020 --end 2025
 uv run kosis collect --org 101 --tbl DT_1B040A3 --prd M --start 202101 --end 202512
+# 분류축이 여럿인 표도 그대로 — 축 개수는 알아서 맞춘다(산업 × 규모)
+uv run kosis data --org 118 --tbl DT_118N_MON051 --prd H --start 202401 --end 202401
 ```
 
 MCP 등록:
@@ -62,13 +64,17 @@ MCP 등록:
 {
   "mcpServers": {
     "kosis": {
+      "type": "stdio",
       "command": "uvx",
-      "args": ["kosis-openapi-mcp"],
+      "args": ["--from", "git+https://github.com/rubatoyd/kosis-openapi-mcp", "kosis-mcp"],
       "env": { "KOSIS_API_KEY": "발급받은_값_그대로" }
     }
   }
 }
 ```
+
+> PyPI 에 올린 패키지가 아직 없어 **저장소에서 바로** 받아 쓴다(자매 저장소와 같은 방식).
+> `main` 의 HEAD 를 쓰므로 다음 기동에 최신이 반영된다.
 
 ## MCP 도구
 
@@ -96,6 +102,10 @@ MCP 등록:
 
 그 밖에:
 
+- 🔴 **분류축(`objL`) 개수가 표의 축 수와 정확히 맞아야 한다** — 모자라면 `err 20 (objL)`,
+  넘치면 `err 21`. 그런데 축 개수를 알려 주는 메타 서비스가 **없다**(`NCD` 는 분류가 아니라
+  신규수록 시점이고 `OBJ`·`CLS` 는 `err 30`). `kosis_data` 가 축을 하나씩 늘려 맞추므로
+  **다축 표(예: 산업 × 규모)도 그냥 부르면 된다** — 확정된 축은 `meta.obj_levels` 에 실린다.
 - **모든 실패가 HTTP 200 이다.** 성공은 배열, 실패는 `{err, errMsg}` 객체.
   `Content-Type` 은 둘 다 `text/html` 이라 믿을 수 없다.
 - **`err 30`(결과 없음)은 오류가 아니다** — 0건과 실패를 구분해서 보고한다.

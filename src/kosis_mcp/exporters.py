@@ -65,22 +65,24 @@ def _table(records: Sequence) -> tuple[list[str], list[dict]]:
        열로 붙인다. 고정 스키마를 강요하면 분류가 통째로 사라진다.
     """
     if records and isinstance(records[0], Observation):
-        base = list(OBS_COLUMNS)
         seen: dict[str, None] = {}
         for r in records:
             for k in r.classes:
                 seen.setdefault(k, None)
-        header = base + list(seen)
-        return header, [r.to_row() for r in records]
+        base = list(OBS_COLUMNS) + list(seen)
+    else:
+        base = list(COLUMNS)
 
+    # 🔴 관측치도 미매핑 필드를 승격한다 — 여기가 빠져 있어서 분류 코드(C1·C2)와
+    #    ORG_ID 가 csv·xlsx 에서 사라지고 있었다. json·sqlite 만 raw 로 살아남았다.
     extras = extra_columns(records)
-    header = COLUMNS + extras
+    header = base + [k for k in extras if k not in base]
     rows = []
     for r in records:
         row = r.to_row()
         um = r.unmapped()
         for k in extras:
-            row[k] = um.get(k, "")
+            row.setdefault(k, um.get(k, ""))
         rows.append(row)
     return header, rows
 

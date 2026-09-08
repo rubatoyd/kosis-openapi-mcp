@@ -46,6 +46,15 @@ def _safe(fn):
 _READ = {"readOnlyHint": True, "openWorldHint": True}
 _WRITE = {"readOnlyHint": False, "destructiveHint": False, "openWorldHint": True}
 
+def _obj_levels(*values: str) -> dict[str, str]:
+    """obj_l2~obj_l8 → {'objL2': …} — **빈 값은 싣지 않는다.**
+
+    🔴 빈 축을 보내면 err 21 이다(축이 하나라도 남으면 개수가 어긋난다). 비워 둔 축은
+       클라이언트가 err 20 `(objL)` 을 보고 필요한 만큼만 'ALL' 로 채운다.
+    """
+    return {f"objL{i}": v.strip() for i, v in enumerate(values, start=2) if v.strip()}
+
+
 _NO_KEY = {
     "error": "KOSIS_API_KEY 미설정 — KOSIS 공유서비스는 인증키가 필요합니다.",
     "hint": "kosis.kr 회원가입 후 공유서비스 활용신청(자동 승인)에서 인증키를 받아 "
@@ -81,6 +90,15 @@ def kosis_guide() -> dict:
             "도구_호출당_요청_상한": MAX_CALLS_PER_TOOL_CALL,
             "페이징": "통합검색·통계목록에는 페이징 파라미터가 없다 — 서버가 준 만큼이 전부다.",
         },
+        "분류축": {
+            "규칙": "요청의 objL 개수가 표의 분류축 개수와 **정확히** 맞아야 한다 — "
+                    "모자라면 err 20 '(objL)', 넘치면 err 21. 그래서 '전부 보내기'는 통하지 않는다.",
+            "축_개수를_아는_법": "없다. 축을 알려 주는 메타 서비스가 없다"
+                                 "(NCD 는 분류가 아니라 신규수록 시점이고 OBJ·CLS 는 err 30). "
+                                 "kosis_data 가 하나씩 늘려 가며 맞추고 meta.obj_levels 로 알린다.",
+            "직접_지정": "obj_l2~obj_l8 에 코드를 주면 그 지점에서 출발한다 — "
+                         "err 31 에 걸릴 때 축을 좁히는 자리다.",
+        },
         "함정": [
             "🔴 `jsonVD=Y` 가 없으면 JSON 이 아니라 자바스크립트 객체 리터럴이 온다"
             "(키에 따옴표가 없다). 개발가이드 입력 변수 표에 없는 파라미터다.",
@@ -88,7 +106,10 @@ def kosis_guide() -> dict:
             "statisticsParameterData.do` 를 써야 한다. `statisticsData.do` 는 항상 err 20.",
             "🔴 인증키를 디코드하지 말 것 — base64 처럼 보여도 발급된 값 그대로 쓴다.",
             "🔴 모든 실패가 HTTP 200 이다. 성공은 배열, 실패는 {err, errMsg} 객체다.",
+            "🔴 분류축이 여럿인 표는 objL 개수를 맞춰야 한다 — 모자라면 err 20 '(objL)', "
+            "넘치면 err 21. kosis_data 가 자동으로 맞추지만, 축을 좁히려면 obj_l2~obj_l8 을 쓴다.",
             "⚠️ err 30(결과 없음)은 오류가 아니다 — 0건과 실패를 구분해서 보고한다.",
+            "⚠️ 없는 메타 `type` 은 err 21 이 아니라 err 30 을 준다 — 오타와 0건이 구분되지 않는다.",
         ],
     }
 
@@ -166,9 +187,16 @@ def kosis_explain(org_id: str, tbl_id: str) -> dict:
 @_safe
 def kosis_data(org_id: str, tbl_id: str, prd_se: str,
                start: str = "", end: str = "", recent: int = 0,
-               obj_l1: str = "ALL", items: str = "ALL",
-               max_rows: int = 20_000) -> dict:
+               obj_l1: str = "ALL", obj_l2: str = "", obj_l3: str = "",
+               obj_l4: str = "", obj_l5: str = "", obj_l6: str = "",
+               obj_l7: str = "", obj_l8: str = "",
+               items: str = "ALL", max_rows: int = 20_000) -> dict:
     """통계표의 수치를 받는다.
+
+    🔴 **분류축이 여럿인 표(예: 산업 × 규모)도 그냥 부르면 된다.** KOSIS 는 요청의
+       분류축 개수가 표의 축 개수와 정확히 맞기를 요구하는데(모자라면 err 20 `(objL)`,
+       넘치면 err 21) 축 개수를 알려 주는 메타가 없다. 그래서 이 도구가 **축을 하나씩
+       늘려 가며 맞춘다** — 결과의 `meta.obj_levels` 에 확정된 축이 실린다.
 
     Args:
         org_id: 기관 ID(예: '101').
@@ -178,6 +206,8 @@ def kosis_data(org_id: str, tbl_id: str, prd_se: str,
             **자동으로 기간을 쪼개** 전수를 받는다.
         recent: 최근 N개 시점. start/end 대신 쓴다(이 방식은 자동 분할이 안 된다).
         obj_l1: 분류1 — 'ALL' 전체, '11' 특정, '11*' 하위 전체, '11+21' 여럿.
+        obj_l2 ~ obj_l8: 분류2~8. **비워 두면 필요한 만큼 'ALL' 로 자동으로 채운다.**
+            4만 셀(err 31)에 걸릴 때 특정 코드로 좁히는 자리이기도 하다.
         items: 항목 — 'ALL' 또는 항목 ID(`kosis_meta(kind='ITM')`).
         max_rows: 돌려줄 최대 행 수(파일로 받으려면 kosis_collect).
     """
@@ -186,7 +216,10 @@ def kosis_data(org_id: str, tbl_id: str, prd_se: str,
     obs, meta = KosisClient().data(
         org_id, tbl_id, prd_se=prd_se,
         start=start or None, end=end or None,
-        recent=recent or None, obj_l1=obj_l1, items=items, max_rows=max_rows)
+        recent=recent or None, obj_l1=obj_l1,
+        obj_levels=_obj_levels(obj_l2, obj_l3, obj_l4, obj_l5,
+                               obj_l6, obj_l7, obj_l8),
+        items=items, max_rows=max_rows)
     return {"observations": [o.to_row() for o in obs], "meta": meta}
 
 
@@ -229,18 +262,24 @@ def kosis_citation(org_id: str, tbl_id: str, accessed: str = "") -> dict:
 def kosis_collect(org_id: str, tbl_id: str, prd_se: str, out_dir: str,
                   start: str = "", end: str = "", recent: int = 0,
                   name: str = "kosis", formats: list[str] | None = None,
-                  obj_l1: str = "ALL", items: str = "ALL") -> dict:
+                  obj_l1: str = "ALL", obj_l2: str = "", obj_l3: str = "",
+                  obj_l4: str = "", obj_l5: str = "", obj_l6: str = "",
+                  obj_l7: str = "", obj_l8: str = "",
+                  items: str = "ALL") -> dict:
     """통계표 수치를 받아 xlsx/csv/json/sqlite 로 저장한다.
 
     ⚠️ 분류 축이 표마다 다르므로 **열 구성이 가변**이다 — 분류 이름이 그대로 열이 된다.
+       축 개수도 표마다 다르지만 `obj_l2`~`obj_l8` 을 비워 두면 자동으로 맞춘다.
     """
     if not get_api_key():
         return _NO_KEY
     client = KosisClient()
     obs, meta = client.data(org_id, tbl_id, prd_se=prd_se,
                             start=start or None, end=end or None,
-                            recent=recent or None, obj_l1=obj_l1, items=items,
-                            max_rows=10 ** 9)
+                            recent=recent or None, obj_l1=obj_l1,
+                            obj_levels=_obj_levels(obj_l2, obj_l3, obj_l4, obj_l5,
+                                                   obj_l6, obj_l7, obj_l8),
+                            items=items, max_rows=10 ** 9)
     paths = export(obs, formats or ["xlsx", "json"], out_dir, name)
     return {"saved": paths, "count": len(obs), "meta": meta}
 

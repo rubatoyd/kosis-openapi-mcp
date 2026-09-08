@@ -3,7 +3,9 @@
 > **KOSIS 국가통계포털 공유서비스**(kosis.kr/openapi) 수집기. 공개 **MCP 서버 + CLI**.
 > 자매 저장소 **law-openapi-mcp**(`../LAW openAPI`) · **na-openapi-mcp**(`../NA openAPI`) ·
 > **nl-openapi-mcp** · **kci-openapi-mcp** · **scienceON-mcp** 와 동일 아키텍처.
-> 규격 → [docs/KOSIS_API_GUIDE.md](docs/KOSIS_API_GUIDE.md) · 원문 → `ref/KOSIS 공유서비스 개발가이드.pdf`(172쪽)
+> 규격 → [docs/KOSIS_API_GUIDE.md](docs/KOSIS_API_GUIDE.md)
+> 원문(172쪽 개발가이드)은 `ref/` 에 두되 **저장소에 넣지 않는다**(gitignore) — 배포 자료다.
+> ⚠️ 그러므로 `ref/` 가 비어 있는 것이 정상이다. 규격의 근거는 docs 와 회귀가 들고 있다.
 
 ## 1. 🔴 이 저장소가 돌려주는 것은 **통계 그 자체**다
 
@@ -22,7 +24,7 @@ KOSIS 는 **조사(STAT_NM)와 표(TBL_NM) 두 층을 다 주므로** 레코드�
 | 항목 | 결정 |
 |------|------|
 | 언어/런타임 | Python 3.10+ |
-| 패키지 관리 | **uv**. venv 는 **클라우드 폴더 밖** `C:/Users/rubat/.venvs/kosis-openapi-mcp` |
+| 패키지 관리 | **uv**. venv 는 **클라우드 폴더 밖** `C:/Users/user/.venvs/kosis-openapi-mcp` — `.claude/settings.local.json` 의 `UV_PROJECT_ENVIRONMENT` 로 지정. ⚠️ 이 값이 없거나 틀리면 uv 가 OneDrive 안에 `.venv` 를 만들려다 **액세스 거부로 죽는다**(실제로 겪었다) |
 | 의존성 | mcp(FastMCP, **`<2` 상한 필수**), requests, openpyxl, python-dotenv, truststore |
 | 인터페이스 | 공용 코어 + **MCP 서버(server.py)** + **CLI(cli.py)** |
 | 출력 | xlsx · csv · json · sqlite |
@@ -44,7 +46,8 @@ tests/fixtures/        # ★ 2026-09-08 의 진짜 응답
 
 ## 4. 🔴 핵심 기술사실 (2026-09-08 라이브 실측)
 
-172쪽짜리 공식 가이드가 있는데도 **가장 중요한 셋이 그 안에 없거나 틀리다.**
+172쪽짜리 공식 가이드가 있는데도 **가장 중요한 넷이 그 안에 없거나 틀리다**(A·B·C·F).
+그중 **F 는 실사용에서 표가 통째로 막혀서야** 드러났다 — 문서도 오류코드도 알려 주지 않는다.
 
 ### (A) `jsonVD=Y` 가 없으면 JSON 이 아니다
 `format=json` 만 주면 **키에 따옴표가 없는 자바스크립트 객체 리터럴**이 온다.
@@ -69,12 +72,28 @@ base64 로 보이지만 **발급값 그대로** 보내야 한다. 풀어서 보�
    **52,587행 전수** 회수(구간 겹침 없음, 회귀로 고정).
 ⚠️ `recent`(최근 N개)는 쪼갤 축이 없어 자동 분할이 안 된다 — 그 사실을 알린다.
 
-### (F) 문서와 다른 것들
+### (F) 🔴 분류축(`objL`) 개수가 **정확히** 맞아야 하는데, 알 방법이 없다
+개발가이드는 `objL2~objL8` 을 '선택'이라 적지만 **표의 축 개수와 정확히 같아야** 한다.
+실측(`118/DT_118N_MON051` 임금표): `objL1` 만 → **err 20 `(objL)`** / `objL1+objL2=ALL`
+→ ✅ 34,496행 / `objL1~objL8=ALL` → **err 21**. 모자라도 넘쳐도 안 된다.
+그런데 축을 알려 주는 메타가 **없다** — `type=NCD` 는 분류가 아니라 신규수록 시점이고
+`OBJ`·`CLS` 는 err 30 이다.
+→ 클라이언트가 **아래에서 위로 하나씩 늘려** 맞춘다(`MissingObjLevel`). 확정된 축은
+   분할 요청들이 물려받아 탐색은 한 번뿐. `meta.obj_levels`·`meta.obj_note` 로 알린다.
+⚠️ **err 20 은 원인이 둘**(엔드포인트 오류 / 축 부족)이라 `(objL)` 로만 가른다.
+⚠️ 이것을 놓치면 **다축 표 전체가 사각지대**가 된다 — 실사용에서 임금 표로 걸렸다.
+
+### (G) 문서와 다른 것들
 - `parentListId` 는 **필수가 아니다** — 생략하면 최상위 목록이 온다(트리의 입구).
 - `method` 값은 검증되지 않는다(`method=nope` 도 정상 결과).
 - 페이징이 **없다** — 서버가 준 만큼이 전부. 조용히 자르지 말고 알린다.
 - 통계설명 본문에 **두 번 이스케이프된** 엔티티(`&amp;ldquo;`).
 - 분류 축 개수가 **표마다 다르다**(C1~C8) — 고정 스키마를 강요하면 분류가 사라진다.
+- **없는 메타 `type` 은 err 21 이 아니라 err 30** 이다(`OBJ`·`CLS` 실측) — 오타와
+  '정말 0건'이 구분되지 않으므로 `META_TYPES` 화이트리스트가 유일한 방어선이다.
+- 🔴 **Windows 콘솔은 cp949 다.** 출력에 `—`·`·`·📁 가 있으면 CLI 가 통째로 죽고,
+  `UnicodeEncodeError` 가 `ValueError` 하위라 `except` 에 걸려 **API 오류로 둔갑**한다.
+  `cli.use_utf8_stdio()` 가 막는다. ⚠️ CI 가 ubuntu 라 이것을 못 잡는다 — 회귀로 고정.
 
 ## 5. 개발 원칙 (자매 저장소 공통 — 이미 값을 치른 것들)
 - 자격증명은 `.env`/MCP env 로만. **`raise_for_status()` 금지** — URL 을 예외에 박는다.
@@ -92,11 +111,16 @@ base64 로 보이지만 **발급값 그대로** 보내야 한다. 풀어서 보�
   ⚠️ **자매 저장소의 사실을 이식하지 말 것.**
 - **커밋 메시지 한국어, Claude 서명 금지.**
 
-## 6. 상태 (2026-09-08)
-- ✅ **v0.1.0 코어 완성** — config·models·parser·client·exporters·server·cli +
-  회귀 **41건**. 라이브 검증: status 왕복 · 통합검색(사교육비 20건) · 목록 트리
-  최상위 30건 · 메타 ITM 34건 · 통계자료 868행 · **err 31 자동 분할로 52,587행**.
-- 🔬 **문서에 없는 것 셋을 실측으로 찾았다**(§4 A·B·C). 특히 (B)는 문서만 보고는
-  절대 알 수 없다 — 가이드의 예제 URL 이 전부 `userStatsId` 방식뿐이다.
+## 6. 상태 (2026-09-08 검토 반영)
+- ✅ **v0.1.0 코어** — config·models·parser·client·exporters·server·cli + CI. 회귀 **53건**.
+  라이브 검증: status 왕복 · 통합검색(사교육비 20건) · 목록 트리 최상위 30건 ·
+  메타 ITM 34건 · 통계자료 868행 · **err 31 자동 분할로 52,587행**.
+- 🔬 **문서에 없는 것 넷을 실측으로 찾았다**(§4 A·B·C·**F**). (B)는 문서만 보고는 절대
+  알 수 없고(예제 URL 이 전부 `userStatsId`), (F)는 **실사용에서 다축 표가 통째로
+  막혀서야** 드러났다 — 축 개수를 알려 주는 메타가 없다는 것이 핵심이다.
+- ✅ 검토에서 고친 것: 다축 분류 자동 승급 + `obj_l2~obj_l8` 노출 · Windows cp949 ·
+  `probe_api` 의 인증키 URL 노출 · 관측치 미매핑 열(C1·C2·ORG_ID) 승격 ·
+  요청 상한 **실제 집행**(광고만 하고 있었다) · `NCD` 라벨 정정 · README 등록법.
 - ⏭️ 다음: ① 대용량(BigData) 서비스 — 같은 키로 err 11, 별도 활용신청 여부 확인(❓)
-  ② 통계주요지표 계열(indiListService 등) 검토 ③ CI 이식 ④ 릴리스(지시 대기)
+  ② 통계주요지표 계열(indiListService 등) 검토 ③ 릴리스 —
+  `publish-mcp.yml`·`mcpb/manifest.json` 은 준비됨, **태그 푸시는 지시 대기**

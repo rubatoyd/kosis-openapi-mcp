@@ -61,6 +61,28 @@ class RateLimited(ApiError):
         super().__init__("40", message, retryable=True)
 
 
+class MissingObjLevel(ApiError):
+    """err 20 중 **`(objL)`** 이 붙은 것 — 분류축을 덜 보냈다는 뜻이다.
+
+    🔴 err 31 과 마찬가지로 **실패가 아니라 신호다**. KOSIS 는 통계표의 분류축 개수와
+       요청의 `objL*` 개수가 **정확히 일치**할 것을 요구한다(2026-09-08 실측):
+
+           축 2개인 표에 objL1 만        → err 20 "필수요청변수값이 누락되었습니다. (objL)"
+           축 2개인 표에 objL1+objL2=ALL → ✅ 34,496행
+           축 2개인 표에 objL1~objL8=ALL → err 21 "잘못된 요청 변수"
+
+       모자라면 20, 넘치면 21이라 **'전부 보내기'로는 넘길 수 없다.** 게다가 축 개수를
+       알려 주는 메타 서비스가 없다(`type=NCD` 는 분류가 아니라 신규수록 시점이고,
+       `OBJ`·`CLS` 는 err 30). 그래서 클라이언트가 **하나씩 늘려 가며 찾는다.**
+
+    ⚠️ err 20 의 다른 원인(잘못된 엔드포인트)과 섞으면 안 된다 — `(objL)` 이 붙은
+       것만 이 갈래로 보낸다.
+    """
+
+    def __init__(self, message: str):
+        super().__init__("20", message, retryable=False)
+
+
 # 재시도가 의미 있는 코드. 인증·필수값 오류는 재시도해도 같은 답이다.
 _RETRYABLE = {"40", "50"}
 _SPECIAL = {"30": NoData, "31": TooManyCells, "40": RateLimited}
@@ -118,6 +140,10 @@ def parse(body: bytes | str, *, what: str) -> Any:
 
 
 def _make(code: str, message: str) -> ApiError:
+    # err 20 은 원인이 둘이다 — 엔드포인트를 틀렸거나, 분류축을 덜 보냈거나.
+    # KOSIS 가 후자에만 `(objL)` 을 붙여 주므로 그것으로 가른다(실측).
+    if code == "20" and "objL" in message:
+        return MissingObjLevel(scrub(message))
     cls = _SPECIAL.get(code)
     if cls:
         return cls(scrub(message))
