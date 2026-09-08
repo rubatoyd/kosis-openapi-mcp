@@ -10,12 +10,13 @@ import json
 import pytest
 
 from kosis_mcp.client import KosisClient, KosisError, _midpoint, _next_period
-from kosis_mcp.config import ERROR_CODES, ENDPOINTS, scrub
+from kosis_mcp.config import ERROR_CODES, ENDPOINTS, META_TYPES, scrub
+from kosis_mcp.exporters import _table
 from kosis_mcp.models import (
     Observation, Table, clean_text, normalize_period,
     observation_from_row, table_from_row)
 from kosis_mcp.parser import (
-    ApiError, NoData, ParseError, RateLimited, TooManyCells,
+    ApiError, MissingObjLevel, NoData, ParseError, RateLimited, TooManyCells,
     looks_like_js_literal, parse, parse_rows)
 
 
@@ -328,3 +329,185 @@ def test_param_endpoint_is_the_one_used_for_data():
     import inspect
     src = inspect.getsource(KosisClient._fetch)
     assert 'ENDPOINTS["param"]' in src
+
+
+# ── 🔴 다축 분류 — 축 개수를 맞히지 못하면 표 전체가 사각지대가 된다 ──────────
+#
+# 2026-09-08 실측(118/DT_118N_MON051 「산업/규모별 임금 및 근로시간」):
+#     objL1 만          → err 20 "필수요청변수값이 누락되었습니다. (objL)"
+#     objL1+objL2=ALL   → ✅ 34,496행 (산업분류 × 규모별)
+#     objL1~objL8=ALL   → err 21 "잘못된 요청 변수"
+# 모자라도 넘쳐도 안 되고, 축 개수를 알려 주는 메타 서비스가 없다.
+def test_err20_objl_is_a_signal_not_a_failure():
+    """err 20 은 원인이 둘이다 — `(objL)` 이 붙은 것만 축 승급 갈래로 보낸다."""
+    objl = json.dumps({"err": "20", "errMsg": "필수요청변수값이 누락되었습니다. (objL)"})
+    assert isinstance(pytest.raises(MissingObjLevel, parse, objl, what="t").value,
+                      MissingObjLevel)
+    # 엔드포인트를 틀린 err 20 은 승급 대상이 아니다 — 축을 늘려 봐야 소용없다.
+    plain = json.dumps({"err": "20", "errMsg": "필수요청변수값이 누락되었습니다."})
+    e = pytest.raises(ApiError, parse, plain, what="t").value
+    assert e.code == "20" and not isinstance(e, MissingObjLevel)
+
+
+class _MultiAxisClient(KosisClient):
+    """분류축이 `axes` 개인 표를 흉내낸다 — 모자라면 err 20, 넘치면 err 21."""
+
+    def __init__(self, axes: int = 2):
+        super().__init__(api_key="stub", throttle=0)
+        self.axes = axes
+        self.seen: list[list[str]] = []
+
+    def _get(self, url, params, *, what):
+        sent = sorted(k for k in params if k.startswith("objL"))
+        self.seen.append(sent)
+        if len(sent) < self.axes:
+            raise MissingObjLevel("필수요청변수값이 누락되었습니다. (objL)")
+        if len(sent) > self.axes:
+            raise KosisError("잘못된 요청 변수를 호출 하였습니다. (코드 21)")
+        return [{"TBL_ID": "T", "PRD_DE": params.get("startPrdDe", "2024"),
+                 "PRD_SE": "Y", "DT": "1", "ITM_NM": "x", "ORG_ID": "118",
+                 "C1": "A", "C1_OBJ_NM": "산업분류", "C1_NM": "제조업",
+                 "C2": "B", "C2_OBJ_NM": "규모별", "C2_NM": "전규모"}]
+
+
+def test_multi_axis_table_is_reachable_without_the_caller_knowing_the_axis_count():
+    """🔴 이 도구로 다축 표를 못 받던 것이 실사용에서 걸린 결함이다."""
+    c = _MultiAxisClient(axes=2)
+    obs, meta = c.data("118", "T", prd_se="Y", start="2024", end="2024")
+    assert obs, "축을 맞히면 자료가 와야 한다"
+    assert meta["obj_levels"] == {"objL1": "ALL", "objL2": "ALL"}
+    assert meta["obj_note"] and "2개" in meta["obj_note"]
+    assert c.seen == [["objL1"], ["objL1", "objL2"]], "아래에서 위로만 올라간다"
+    assert obs[0].classes == {"산업분류": "제조업", "규모별": "전규모"}
+
+
+def test_single_axis_table_is_not_over_escalated():
+    """축이 하나인 표에 objL2 를 얹으면 err 21 이다 — 한 번에 맞아야 한다."""
+    c = _MultiAxisClient(axes=1)
+    obs, meta = c.data("101", "T", prd_se="Y", start="2024", end="2024")
+    assert obs and c.seen == [["objL1"]]
+    assert meta["obj_levels"] == {"objL1": "ALL"} and meta["obj_note"] is None
+
+
+def test_resolved_axes_are_reused_across_split_chunks():
+    """확정된 축은 뒤따르는 분할 요청이 물려받는다 — 축 탐색은 처음 한 번뿐이다."""
+    class C(_MultiAxisClient):
+        def _get(self, url, params, *, what):
+            rows = super()._get(url, params, what=what)
+            s, e = params["startPrdDe"], params["endPrdDe"]
+            if int(e) - int(s) > 1:
+                raise TooManyCells("조회결과 초과")
+            return rows
+    c = C(axes=2)
+    _obs, meta = c.data("118", "T", prd_se="Y", start="2020", end="2024")
+    assert meta["requests"] > 3, "분할이 실제로 일어나야 이 회귀가 의미 있다"
+    assert sum(1 for s in c.seen if s == ["objL1"]) == 1, "축 탐색이 반복되면 안 된다"
+
+
+def test_axis_escalation_gives_up_with_an_actionable_message():
+    class C(KosisClient):
+        def _get(self, url, params, *, what):
+            raise MissingObjLevel("(objL)")
+    with pytest.raises(KosisError) as e:
+        C(api_key="x", throttle=0).data("1", "T", prd_se="Y", start="2024", end="2024")
+    assert "obj_l2" in str(e.value)
+
+
+def test_explicit_obj_levels_are_the_starting_point():
+    """호출자가 축을 주면 그 지점에서 출발한다(err 31 을 피해 좁힐 때)."""
+    c = _MultiAxisClient(axes=2)
+    obs, meta = c.data("118", "T", prd_se="Y", start="2024", end="2024",
+                       obj_levels={"objL2": "13102"})
+    assert obs and c.seen == [["objL1", "objL2"]], "이미 맞으면 헛걸음이 없어야 한다"
+    assert meta["obj_levels"]["objL2"] == "13102"
+    assert meta["obj_note"] is None, "승급이 없었으면 안내도 없다"
+
+
+def test_server_tool_exposes_the_axes_and_drops_blanks():
+    """🔴 client 에만 있고 도구에 없으면 다축 표는 사각지대다."""
+    from kosis_mcp.server import _obj_levels, kosis_data
+    import inspect
+    sig = inspect.signature(getattr(kosis_data, "fn", kosis_data)).parameters
+    for i in range(2, 9):
+        assert f"obj_l{i}" in sig, f"obj_l{i} 가 도구 인자로 노출돼야 한다"
+    # 빈 축을 실어 보내면 개수가 어긋나 err 21 이 된다 — 반드시 떨어내야 한다.
+    assert _obj_levels("", "13102", "", "", "", "", "") == {"objL3": "13102"}
+    assert _obj_levels(*[""] * 7) == {}
+
+
+# ── 🔴 Windows 콘솔(cp949) ──────────────────────────────────────────────────
+def test_cli_survives_a_cp949_console(capsys, monkeypatch):
+    """`—`·`·` 때문에 CLI 가 통째로 죽었다 — CI 가 ubuntu 라 못 잡았다.
+
+    ⚠️ UnicodeEncodeError 는 ValueError 하위라 `except` 에 걸려 **인코딩 사고가
+       API 오류로 둔갑**했다. 원인이 가려지는 쪽이 더 나쁘다.
+    """
+    import io
+    from kosis_mcp import cli
+
+    class Cp949Out(io.TextIOWrapper):
+        pass
+
+    buf = Cp949Out(io.BytesIO(), encoding="cp949", errors="strict")
+    monkeypatch.setattr(cli.sys, "stdout", buf)
+    monkeypatch.setattr(cli.sys, "stderr", buf)
+    cli.use_utf8_stdio()
+    buf.write("요청 — 4만 셀 · 📁")        # 재설정 전이면 UnicodeEncodeError
+    buf.flush()
+    assert buf.encoding.lower().replace("-", "") == "utf8"
+
+
+def test_use_utf8_stdio_tolerates_streams_it_cannot_reconfigure():
+    """파이프·캡처 등 재설정 불가 스트림에서 조용히 넘어가야 한다."""
+    import io
+    from kosis_mcp import cli
+    real_out, real_err = cli.sys.stdout, cli.sys.stderr
+    cli.sys.stdout = cli.sys.stderr = io.StringIO()   # reconfigure 가 없다
+    try:
+        cli.use_utf8_stdio()                          # 예외 없이 지나가야 한다
+    finally:
+        cli.sys.stdout, cli.sys.stderr = real_out, real_err
+
+
+# ── 요청 상한은 광고가 아니라 집행이어야 한다 ────────────────────────────────
+def test_call_budget_is_actually_enforced():
+    """`kosis_guide` 가 알리던 상한이 코드 어디서도 검사되지 않았다."""
+    class C(KosisClient):
+        def __init__(self):
+            super().__init__(api_key="x", throttle=0, max_calls=3)
+
+        def _get(self, url, params, *, what):
+            self._check_budget()
+            self.calls += 1
+            raise TooManyCells("초과")      # 계속 쪼개게 만든다
+    with pytest.raises(KosisError) as e:
+        C().data("101", "T", prd_se="M", start="200001", end="202512")
+    assert "상한" in str(e.value)
+
+
+# ── 관측치의 미매핑 필드(분류 코드)를 잃지 않는다 ────────────────────────────
+def test_observation_export_keeps_classification_codes():
+    """🔴 분류 '이름'만 열이 되고 **코드(C1·C2)와 ORG_ID 가 사라지고 있었다.**
+
+    코드가 없으면 부분조회(obj_l1='13102')로 되돌아갈 수도, 분류 메타와 이을 수도 없다.
+    """
+    o = observation_from_row({
+        "TBL_ID": "T", "PRD_DE": "2024", "PRD_SE": "Y", "DT": "1",
+        "ITM_ID": "I1", "ITM_NM": "임금", "UNIT_NM": "천원", "ORG_ID": "118",
+        "C1": "13102", "C1_OBJ_NM": "산업분류", "C1_NM": "제조업",
+        "C2": "ALL", "C2_OBJ_NM": "규모별", "C2_NM": "전규모"})
+    header, rows = _table([o])
+    for col in ("산업분류", "규모별", "C1", "C2", "ORG_ID"):
+        assert col in header, f"{col} 이 csv/xlsx 열에서 사라졌다"
+    assert rows[0]["C1"] == "13102" and rows[0]["ORG_ID"] == "118"
+    assert rows[0]["산업분류"] == "제조업"
+
+
+def test_meta_type_labels_match_what_the_api_returns():
+    """`NCD` 는 분류가 아니다 — 응답이 시점별 수록일자로 온다(실측).
+
+    없는 `type` 은 err 21 이 아니라 err 30 을 주므로(OBJ·CLS 실측) 오타와 0건이
+    구분되지 않는다. 이 화이트리스트가 유일한 방어선이라 라벨이 사실이어야 한다.
+    """
+    assert "분류" not in META_TYPES["NCD"]
+    assert META_TYPES["NCD"] == "신규수록 시점"

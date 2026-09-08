@@ -20,6 +20,8 @@ from .config import (
     DEFAULT_THROTTLE,
     ENDPOINTS,
     ERROR_CODES,
+    MAX_CALLS_PER_TOOL_CALL,
+    MAX_OBJ_LEVELS,
     META_TYPES,
     VIEW_CODES,
     get_api_key,
@@ -29,7 +31,8 @@ from .config import (
 )
 from .models import Observation, Table, observation_from_row, table_from_row
 from .parser import (
-    ApiError, NoData, ParseError, RateLimited, TooManyCells, parse_rows)
+    ApiError, MissingObjLevel, NoData, ParseError, RateLimited, TooManyCells,
+    parse_rows)
 
 log = logging.getLogger("kosis_mcp")
 
@@ -41,13 +44,15 @@ class KosisError(RuntimeError):
 class KosisClient:
     def __init__(self, *, api_key: str | None = None,
                  throttle: float = DEFAULT_THROTTLE, timeout: int = 40,
-                 max_retries: int = 3) -> None:
+                 max_retries: int = 3,
+                 max_calls: int = MAX_CALLS_PER_TOOL_CALL) -> None:
         use_os_trust()
         install_log_scrubber()
         self.api_key = (api_key or get_api_key() or "").strip()
         self.throttle = max(0.0, throttle)
         self.timeout = timeout
         self.max_retries = max(1, max_retries)
+        self.max_calls = max(1, max_calls)
         self._session = requests.Session()
         self._session.headers["User-Agent"] = (
             f"kosis-openapi-mcp/{__version__} "
@@ -70,6 +75,19 @@ class KosisClient:
             time.sleep(self.throttle - gap)
         self._last = time.monotonic()
 
+    def _check_budget(self) -> None:
+        """🔴 한 번의 도구 호출이 낼 수 있는 요청 수를 **실제로** 막는다.
+
+        ⚠️ `kosis_guide` 가 이 상한을 알리고 있었지만 코드 어디서도 검사하지 않았다.
+           없는 안전장치를 있다고 알리는 것이 더 나쁘다. 자동 분할(err 31)은 기간을
+           반씩 쪼개므로 넓은 구간 × 촘촘한 주기에서 요청이 기하급수로 늘 수 있다.
+        """
+        if self.calls >= self.max_calls:
+            raise KosisError(
+                f"이 도구 호출에서 API 요청이 상한({self.max_calls}회)에 닿았습니다. "
+                f"기간을 좁히거나(start/end), 분류·항목을 지정해 한 번에 받는 양을 "
+                f"줄이세요. 상한은 KOSIS_MAX_CALLS_PER_TOOL_CALL 로 조정합니다.")
+
     def _get(self, url: str, params: dict, *, what: str) -> list[dict]:
         """1회 호출 + 재시도 → 레코드 목록.
 
@@ -77,6 +95,7 @@ class KosisClient:
            예외 메시지에 박는다. 상태코드만 본다. requests 예외도 **타입만** 남긴다.
         """
         self._require_key()
+        self._check_budget()
         q = {"apiKey": self.api_key, "format": "json", "jsonVD": "Y", **params}
         last: Exception | None = None
         for attempt in range(self.max_retries):
@@ -94,7 +113,7 @@ class KosisClient:
                 else:
                     try:
                         return parse_rows(resp.content, what=what)
-                    except (NoData, TooManyCells):
+                    except (NoData, TooManyCells, MissingObjLevel):
                         raise                      # 호출자가 뜻있게 다룬다
                     except RateLimited as e:
                         last = e
@@ -214,6 +233,12 @@ class KosisClient:
 
         🔴 한 요청은 **4만 셀 이하**여야 한다(err 31). 기간을 준 경우에는 초과 시
            **자동으로 절반씩 쪼개** 다시 부른다 — 호출자가 신경 쓰지 않아도 된다.
+
+        🔴 **분류축 개수는 표마다 다르고 정확히 맞아야 한다.** 모자라면 err 20 `(objL)`,
+           넘치면 err 21 이다(실측). 축 개수를 알려 주는 메타 서비스가 없으므로
+           err 20 `(objL)` 을 만나면 **축을 하나씩 늘려 가며** 다시 부른다 — 이것도
+           호출자가 신경 쓸 일이 아니다. 실측: 임금 표(산업분류 × 규모별)는 축 2개에서
+           34,496행을 준다. `obj_levels` 로 직접 지정하면 그 지점에서 출발한다.
         """
         self._require_key()
         if not (start and end) and not recent:
@@ -223,24 +248,35 @@ class KosisClient:
 
         base = {"method": "getList", "orgId": org_id, "tblId": tbl_id,
                 "objL1": obj_l1, "itmId": items, "prdSe": prd_se}
-        for k, v in (obj_levels or {}).items():
-            if v:
-                base[k] = v
+        # 🔴 objL2~objL8 은 base 에 굽지 않는다 — 자동 승급이 요청마다 얹어야 하고,
+        #    한 번 확정되면 뒤따르는 분할 요청들이 그것을 그대로 물려받아야 한다.
+        state: dict[str, Any] = {
+            "levels": {k: v for k, v in (obj_levels or {}).items() if v},
+            "escalated": False,
+        }
 
         meta: dict[str, Any] = {"org_id": org_id, "tbl_id": tbl_id, "prd_se": prd_se,
-                                "requests": 0, "chunks": [], "split_note": None}
+                                "requests": 0, "chunks": [], "split_note": None,
+                                "obj_levels": None, "obj_note": None}
         rows: list[dict] = []
 
         if recent and not (start and end):
             # 최근 N개 시점 — 쪼갤 축이 없으므로 초과하면 N 을 줄이라고 알린다.
             try:
-                rows = self._fetch(base | {"newEstPrdCnt": str(int(recent))}, meta)
+                rows = self._fetch(base | {"newEstPrdCnt": str(int(recent))}, meta, state)
             except TooManyCells:
                 raise KosisError(
                     f"요청이 4만 셀 제한을 넘습니다(err 31). `recent={recent}` 를 줄이거나, "
                     f"`start`/`end` 로 기간을 주면 이 도구가 자동으로 쪼갭니다.") from None
         else:
-            rows = self._fetch_range(base, str(start), str(end), meta)
+            rows = self._fetch_range(base, str(start), str(end), meta, state)
+
+        meta["obj_levels"] = {"objL1": obj_l1, **state["levels"]}
+        if state["escalated"]:
+            meta["obj_note"] = (
+                f"이 표는 분류축이 {len(state['levels']) + 1}개입니다 — "
+                f"err 20(objL)을 보고 자동으로 {', '.join(state['levels'])} 를 "
+                f"'ALL' 로 채워 받았습니다. 축을 좁히려면 obj_l2~obj_l8 에 코드를 주세요.")
 
         obs = [observation_from_row(r) for r in rows]
         meta["total"] = len(obs)
@@ -251,16 +287,40 @@ class KosisClient:
         meta["fetched"] = len(obs)
         return obs, meta
 
-    def _fetch(self, params: dict, meta: dict) -> list[dict]:
-        meta["requests"] += 1
-        return self._get(ENDPOINTS["param"], params,
-                         what=f"통계자료 {params.get('orgId')}/{params.get('tblId')}")
+    def _fetch(self, params: dict, meta: dict, state: dict) -> list[dict]:
+        """1회 요청 — err 20 `(objL)` 이면 **분류축을 하나 늘려** 다시 부른다.
+
+        🔴 표의 분류축 개수를 알려 주는 메타 서비스가 없어서(‘NCD’ 는 분류가 아니라
+           신규수록 시점이고 ‘OBJ’·‘CLS’ 는 err 30) 맞혀 보는 수밖에 없다. 모자라면
+           err 20, 넘치면 err 21 이므로 **아래에서 위로** 올라가는 방향만 안전하다.
+
+        확정된 축은 `state` 에 남아 뒤따르는 분할 요청이 그대로 물려받는다 —
+        60개월 구간이 3번 쪼개져도 축 탐색은 처음 한 번뿐이다.
+        """
+        what = f"통계자료 {params.get('orgId')}/{params.get('tblId')}"
+        while True:
+            meta["requests"] += 1
+            try:
+                return self._get(ENDPOINTS["param"], params | state["levels"], what=what)
+            except MissingObjLevel:
+                used = {int(k[4:]) for k in state["levels"]
+                        if k.startswith("objL") and k[4:].isdigit()}
+                nxt = max(used | {1}) + 1
+                if nxt > MAX_OBJ_LEVELS:
+                    raise KosisError(
+                        f"분류축을 objL{MAX_OBJ_LEVELS} 까지 늘려도 KOSIS 가 "
+                        f"'필수요청변수 누락(objL)'을 돌려줍니다 — 이 표의 축 구성을 "
+                        f"kosis.kr 통계표 화면에서 확인해 obj_l2~obj_l8 로 직접 주세요."
+                    ) from None
+                state["levels"][f"objL{nxt}"] = "ALL"
+                state["escalated"] = True
+                log.info("err 20(objL) — 분류축을 objL%d 까지 늘려 재시도", nxt)
 
     def _fetch_range(self, base: dict, start: str, end: str, meta: dict,
-                     depth: int = 0) -> list[dict]:
+                     state: dict, depth: int = 0) -> list[dict]:
         """기간을 주고 받아오되, err 31 이면 **절반으로 쪼개** 재귀한다."""
         try:
-            out = self._fetch(base | {"startPrdDe": start, "endPrdDe": end}, meta)
+            out = self._fetch(base | {"startPrdDe": start, "endPrdDe": end}, meta, state)
             meta["chunks"].append({"start": start, "end": end, "rows": len(out)})
             return out
         except NoData:
@@ -270,7 +330,7 @@ class KosisClient:
             if start == end or depth > 12:
                 raise KosisError(
                     f"단일 시점({start})만으로도 4만 셀 제한을 넘습니다 — "
-                    f"분류(objL1)나 항목(itmId)을 좁혀 주세요. "
+                    f"분류(obj_l1~obj_l8)나 항목(items)을 좁혀 주세요. "
                     f"'ALL' 대신 특정 코드를 쓰면 줄어듭니다.") from None
             mid = _midpoint(start, end)
             if mid is None or mid == end:
@@ -281,9 +341,9 @@ class KosisClient:
                 "4만 셀 제한(err 31)에 걸려 기간을 자동으로 쪼개 받았습니다 — "
                 "결과는 합쳐진 전수입니다.")
             log.info("err 31 — 기간 분할 %s~%s → %s | %s~%s", start, end, mid, mid, end)
-            left = self._fetch_range(base, start, mid, meta, depth + 1)
+            left = self._fetch_range(base, start, mid, meta, state, depth + 1)
             right = self._fetch_range(base, _next_period(mid, base.get("prdSe", "")),
-                                      end, meta, depth + 1)
+                                      end, meta, state, depth + 1)
             return left + right
 
     # ── 상태 ─────────────────────────────────────────────────────────────────

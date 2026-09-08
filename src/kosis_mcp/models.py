@@ -232,6 +232,21 @@ class Observation:
         row.update(self.classes)
         return row
 
+    def unmapped(self) -> dict[str, str]:
+        """정규화 칸으로 안 간 원본 필드 — **버리지 않는다**.
+
+        🔴 여기가 비어 있어서 csv·xlsx 가 **분류 코드(C1·C2)와 ORG_ID 를 통째로
+           잃고 있었다.** 분류는 이름만 열이 되고 코드는 어디에도 없었는데, 코드가
+           없으면 부분조회(`obj_l1='13102'`)로 되돌아갈 수도, 분류 메타와 이을 수도
+           없다. 값이 있는데 볼 방법이 없는 것은 조용한 데이터 손실이다
+           (자매 저장소 na-openapi-mcp 가 같은 자리에서 서술형 본문을 잃었다).
+        """
+        used = {"TBL_ID", "TBL_NM", "PRD_DE", "PRD_SE", "ITM_ID", "ITM_NM",
+                "UNIT_NM", "DT", "LST_CHN_DE"}
+        used.update(f"C{i}_{suffix}" for i in range(1, 9)
+                    for suffix in ("NM", "OBJ_NM"))
+        return {k: clean_text(v) for k, v in self.raw.items() if k not in used}
+
 
 def observation_from_row(r: dict) -> Observation:
     """통계자료 응답의 한 행 → Observation.

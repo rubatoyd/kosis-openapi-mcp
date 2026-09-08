@@ -31,12 +31,22 @@ _s = requests.Session()
 _s.headers["User-Agent"] = "kosis-openapi-mcp-probe (+github.com/rubatoyd/kosis-openapi-mcp)"
 
 
+class ProbeError(RuntimeError):
+    """탐침 실패 — 🔴 **요청 URL 을 절대 싣지 않는다.**"""
+
+
 def call(url: str, **params):
     # 🔴 `jsonVD=Y` 가 없으면 **JSON 이 아니라 자바스크립트 객체 리터럴**이 온다
     #    (키에 따옴표가 없어 json.loads 가 거부한다). 개발가이드의 입력 변수 표에는
-    #    이 파라미터가 **없고**, JSP 예제 소스 안에만 있다.
+    #    이 파라미터가 **없고**, JSP 소스 안에만 있다.
     params.setdefault("jsonVD", "Y")
-    r = _s.get(url, params=params, timeout=40)
+    # 🔴 requests 예외는 **인증키가 든 전체 URL** 을 메시지에 박는다. 여기서 잡지 않으면
+    #    망 오류 한 번에 키가 콘솔·CI 로그·스크린샷으로 나간다(2026-09-08 실제 발생).
+    #    client._get 이 같은 이유로 raise_for_status 를 쓰지 않는다 — 탐침도 같아야 한다.
+    try:
+        r = _s.get(url, params=params, timeout=40)
+    except requests.RequestException as e:
+        raise ProbeError(f"요청 실패: {type(e).__name__}") from None
     time.sleep(THROTTLE)
     return r
 
@@ -162,7 +172,12 @@ def main(argv: list[str]) -> int:
     if any(n not in COMMANDS for n in names):
         print(f"사용법: probe_api.py [{'|'.join(COMMANDS)}|all]", file=sys.stderr)
         return 2
-    result = {n: COMMANDS[n]() for n in names}
+    try:
+        result = {n: COMMANDS[n]() for n in names}
+    except ProbeError as e:
+        # 메시지에 URL 이 없다는 것이 요점이다 — traceback 도 띄우지 않는다.
+        print(f"탐침 실패: {scrub(str(e))}", file=sys.stderr)
+        return 1
     Path("probe-out").mkdir(exist_ok=True)
     Path(f"probe-out/probe_{what}.json").write_text(
         json.dumps(result, ensure_ascii=False, indent=1), encoding="utf-8")
