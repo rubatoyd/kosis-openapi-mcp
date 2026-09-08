@@ -2,8 +2,10 @@
 .env
 .claude/settings.local.json
 
-# 배포 자료(개발가이드 PDF 등) — 저장소에 넣지 않는다
+# 배포 자료(개발가이드 PDF 등) — 저장소에 넣지 않는다.
+# ⚠️ 12MB 정부 발간물이다. 재배포도 저장소 비대화도 원치 않는다.
 ref/
+docs/*.pdf
 
 # 산출물
 output/
