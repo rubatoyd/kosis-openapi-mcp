@@ -1,0 +1,105 @@
+{
+  "manifest_version": "0.3",
+  "name": "kosis-openapi-mcp",
+  "display_name": "국가통계포털 KOSIS 수집기 (kosis-openapi-mcp)",
+  "version": "0.1.0",
+  "author": {
+    "name": "Yeondong Yang",
+    "url": "https://github.com/rubatoyd/kosis-openapi-mcp"
+  },
+  "homepage": "https://github.com/rubatoyd/kosis-openapi-mcp",
+  "documentation": "https://github.com/rubatoyd/kosis-openapi-mcp#readme",
+  "license": "MIT",
+  "keywords": [
+    "kosis",
+    "korea",
+    "statistics",
+    "openapi",
+    "official-statistics",
+    "time-series",
+    "data",
+    "mcp"
+  ],
+  "user_config": {
+    "api_key": {
+      "type": "string",
+      "title": "KOSIS 인증키",
+      "description": "kosis.kr 회원가입 후 공유서비스 활용신청(자동 승인)에서 발급받은 인증키. 🔴 발급된 값을 그대로 넣으세요 — base64 처럼 보여도(끝이 =) 디코드하면 err 11 이 납니다.",
+      "sensitive": true,
+      "required": true,
+      "default": ""
+    },
+    "os_trust": {
+      "type": "string",
+      "title": "OS 신뢰저장소 TLS (교육망/사내망)",
+      "description": "교육망·사내망 SSL 인터셉션 환경이면 1(기본). 1=OS 신뢰저장소 사용, 0=비활성.",
+      "required": false,
+      "default": "1"
+    }
+  },
+  "tools": [
+    {
+      "name": "kosis_status",
+      "description": "연결 점검 — 인증키 유효성 + KOSIS 실제 왕복 1회"
+    },
+    {
+      "name": "kosis_guide",
+      "description": "이 API 의 서비스뷰·수록주기·메타 종류·오류코드·한계·함정 — 부르기 전에 읽으면 err 20/21 을 피한다"
+    },
+    {
+      "name": "kosis_search",
+      "description": "통계표 찾기(KOSIS 통합검색). 조사명(STAT_NM)과 표제(TBL_NM) 두 층을 함께 돌려준다. ⚠️ 페이징이 없어 서버가 준 만큼이 전부이며 그 사실을 meta 로 알린다"
+    },
+    {
+      "name": "kosis_list",
+      "description": "통계목록 트리를 한 단계 훑는다(주제별·기관별·e-지방지표 등). parent_id 를 비우면 최상위 — 개발가이드는 필수라 적지만 실제로는 생략 가능"
+    },
+    {
+      "name": "kosis_meta",
+      "description": "통계표의 메타자료 — 항목(ITM)·수록기간(PRD)·출처(SOURCE)·주석(CMMT) 등. ⚠️ 분류축을 알려 주는 종류는 없다(NCD 는 분류가 아니라 신규수록 시점)"
+    },
+    {
+      "name": "kosis_explain",
+      "description": "통계설명(조사개요) — 목적·근거·주기·범위. 통계표에는 초록이 없으므로 관련도 채점·요약의 재료가 된다"
+    },
+    {
+      "name": "kosis_data",
+      "description": "통계표의 수치(시점 × 분류 × 항목 → 값). 🔴 4만 셀 제한(err 31)에 걸리면 기간을 절반씩 자동 분할해 전수를 회수하고, 분류축 개수(err 20 objL)도 자동으로 맞춘다 — 다축 표(산업 × 규모)도 그냥 부르면 된다"
+    },
+    {
+      "name": "kosis_citation",
+      "description": "통계표 하나를 서지(인용) 칸으로 투영 — 선택 기능. 조사층·표층 중 어느 쪽으로 인용할지는 부르는 쪽이 고른다"
+    },
+    {
+      "name": "kosis_collect",
+      "description": "통계표 수치를 받아 xlsx/csv/json/sqlite 로 저장. 분류 축이 표마다 달라 열 구성이 가변이며, 분류 코드(C1~C8)와 미매핑 원본 필드도 열로 함께 나간다"
+    }
+  ],
+  "description": "KOSIS 국가통계포털 공유서비스 수집기 — 통계표 검색·메타·수치. 4만 셀 제한(err 31)은 기간 자동 분할로, 분류축 개수(err 20 objL)는 자동 승급으로 넘긴다. xlsx/csv/json/sqlite 내보내기",
+  "server": {
+    "type": "binary",
+    "entry_point": "uvx",
+    "mcp_config": {
+      "command": "uvx",
+      "args": [
+        "--from",
+        "git+https://github.com/rubatoyd/kosis-openapi-mcp",
+        "kosis-mcp"
+      ],
+      "env": {
+        "KOSIS_API_KEY": "${user_config.api_key}",
+        "KOSIS_OS_TRUST": "${user_config.os_trust}"
+      }
+    }
+  },
+  "compatibility": {
+    "platforms": [
+      "win32",
+      "darwin",
+      "linux"
+    ],
+    "runtimes": {
+      "python": ">=3.10"
+    }
+  }
+}
