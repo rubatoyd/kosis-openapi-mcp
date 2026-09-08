@@ -56,6 +56,9 @@ uv run kosis data --org 101 --tbl DT_1PE201 --prd Y --start 2020 --end 2025
 uv run kosis collect --org 101 --tbl DT_1B040A3 --prd M --start 202101 --end 202512
 # 분류축이 여럿인 표도 그대로 — 축 개수는 알아서 맞춘다(산업 × 규모)
 uv run kosis data --org 118 --tbl DT_118N_MON051 --prd H --start 202401 --end 202401
+# 주요지표(통계표와 다른 계열) — 표 구조를 몰라도 값까지 바로
+uv run kosis indicator 출산율
+uv run kosis indicator-data --id 13 --start 2020 --end 2025
 ```
 
 MCP 등록:
@@ -89,6 +92,8 @@ MCP 등록:
 | `kosis_data` | 수치 — **4만 셀 초과 시 기간 자동 분할** |
 | `kosis_citation` | 표를 서지 칸으로 투영(부가 기능) |
 | `kosis_collect` | 수치를 xlsx/csv/json/sqlite 로 저장 |
+| `kosis_indicator_search` | **주요지표** 찾기(통계표와 다른 계열) — 페이징 전수 회수 |
+| `kosis_indicator_data` | 주요지표의 시점별 수치 — **서버가 안 거르는 시점을 대신 거른다** |
 
 ## 알아 둘 것 (전부 실측)
 
@@ -111,8 +116,10 @@ MCP 등록:
 - **`err 30`(결과 없음)은 오류가 아니다** — 0건과 실패를 구분해서 보고한다.
 - **요청당 4만 셀**(err 31) · **분당 200건**(err 40).
 - **페이징이 없다** — 통합검색·목록·통계자료는 서버가 준 만큼이 전부다(조용히 자르지 않고 알린다).
-  단 **통계주요지표 계열만 예외**로 `pageNo`·`numOfRows` 를 받고 안 주면 10건에서 잘린다
-  (이 저장소가 아직 다루지 않는 계열 — 규격은 [docs](docs/KOSIS_API_GUIDE.md) §7).
+  단 **통계주요지표 계열만 예외**로 `pageNo`·`numOfRows` 를 받고 안 주면 10건에서 잘린다 —
+  `kosis_indicator_*` 가 끝까지 넘겨 전수를 회수한다([docs](docs/KOSIS_API_GUIDE.md) §7).
+- 🔴 **주요지표 계열은 시점 범위를 거르지 않는다**(모드 스위치일 뿐 값은 무시된다).
+  `kosis_indicator_data` 가 전 구간을 받아 직접 거르고 `meta.server_filtered=false` 로 알린다.
 - `parentListId` 는 필수라고 적혀 있지만 **생략하면 최상위**가 온다.
 
 자세한 근거와 재현 방법은 [docs/KOSIS_API_GUIDE.md](docs/KOSIS_API_GUIDE.md).

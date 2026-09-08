@@ -2,7 +2,7 @@
   "manifest_version": "0.3",
   "name": "kosis-openapi-mcp",
   "display_name": "국가통계포털 KOSIS 수집기 (kosis-openapi-mcp)",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "author": {
     "name": "Yeondong Yang",
     "url": "https://github.com/rubatoyd/kosis-openapi-mcp"
@@ -73,6 +73,14 @@
     {
       "name": "kosis_collect",
       "description": "통계표 수치를 받아 xlsx/csv/json/sqlite 로 저장. 분류 축이 표마다 달라 열 구성이 가변이며, 분류 코드(C1~C8)와 미매핑 원본 필드도 열로 함께 나간다"
+    },
+    {
+      "name": "kosis_indicator_search",
+      "description": "주요지표를 이름으로 찾는다(통계표와 다른 계열 — 합계출산율·추계인구 등). 🔴 이 계열에만 페이징이 있고 안 주면 10건에서 잘리는데, 도구가 끝까지 넘겨 전수를 회수한다"
+    },
+    {
+      "name": "kosis_indicator_data",
+      "description": "주요지표의 시점별 수치. 🔴 KOSIS 가 이 계열에서는 시점 범위를 거르지 않으므로(모드 스위치일 뿐) 전 구간을 받아 도구가 직접 거르고 meta.server_filtered 로 그 사실을 알린다"
     }
   ],
   "description": "KOSIS 국가통계포털 공유서비스 수집기 — 통계표 검색·메타·수치. 4만 셀 제한(err 31)은 기간 자동 분할로, 분류축 개수(err 20 objL)는 자동 승급으로 넘긴다. xlsx/csv/json/sqlite 내보내기 — 자체완결 바이너리(Python·uv 불필요)",

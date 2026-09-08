@@ -14,7 +14,8 @@ from kosis_mcp.client import KosisClient, KosisError, _midpoint, _next_period
 from kosis_mcp.config import ERROR_CODES, ENDPOINTS, META_TYPES, scrub
 from kosis_mcp.exporters import _table, export
 from kosis_mcp.models import (
-    COLUMNS, OBS_COLUMNS, Observation, Table, clean_text, normalize_period,
+    COLUMNS, OBS_COLUMNS, Observation, Table, clean_text,
+    indicator_from_row, indicator_value_from_row, normalize_period,
     observation_from_row, table_from_row)
 from kosis_mcp.parser import (
     ApiError, MissingObjLevel, NoData, ParseError, RateLimited, TooManyCells,
@@ -643,3 +644,133 @@ def test_recent_mode_reports_zero_rows_instead_of_raising():
     obs, meta = C(api_key="x", throttle=0).data("101", "T", prd_se="Y", recent=1)
     assert obs == [] and meta["total"] == 0 and meta["no_data"] is True
     assert "라이선스" in meta["note"]
+
+
+# ── 통계주요지표 — 규칙이 다른 계열이므로 그 차이를 회귀로 붙든다 ────────────
+def test_indicator_rows_map_to_the_indicator_schema(fx):
+    """🔴 수치 칸이 `DT` 가 아니라 `val`, 시점이 `PRD_DE` 가 아니라 `prdDe` 다.
+
+    통계자료 파서를 재사용하면 전부 빈 값이 된다 — 계열이 다르면 대소문자도 다르다.
+    """
+    inds = [indicator_from_row(r) for r in parse_rows(fx("ind_search.json"), what="지표")]
+    assert inds and inds[0].jipyo_id and inds[0].jipyo_nm
+    assert inds[0].unit and inds[0].period_from and inds[0].period_to
+    assert inds[0].scoring_text()
+
+    vals = [indicator_value_from_row(r)
+            for r in parse_rows(fx("ind_values.json"), what="지표수치")]
+    assert vals and all(v.value for v in vals), "val 이 값으로 잡혀야 한다"
+    assert all(v.period for v in vals), "prdDe 가 시점으로 잡혀야 한다"
+    # 통계자료 파서로 읽으면 비어야 한다 — 두 계열이 섞이지 않는다는 증거
+    assert not observation_from_row(parse_rows(fx("ind_values.json"),
+                                               what="x")[0]).value
+
+
+class _PagedClient(KosisClient):
+    """페이징하는 서버를 흉내낸다 — `numOfRows` 를 안 주면 10건만 주는 그 서버."""
+
+    def __init__(self, total: int = 113):
+        super().__init__(api_key="stub", throttle=0)
+        self.total = total
+        self.pages_seen: list[tuple[int, int]] = []
+        self.sent: list[dict] = []
+
+    def _get(self, url, params, *, what):
+        self.sent.append(dict(params))
+        size = int(params.get("numOfRows", 10))      # 🔴 기본 10건이 이 계열의 함정
+        page = int(params.get("pageNo", 1))
+        self.pages_seen.append((page, size))
+        lo, hi = (page - 1) * size, min(page * size, self.total)
+        if lo >= self.total:
+            raise NoData("데이터가 존재하지 않습니다")
+        return [{"statJipyoId": str(i), "statJipyoNm": f"지표{i}", "unit": "명",
+                 "prdDe": str(1970 + i), "prdSe": "Y", "val": str(i),
+                 "itmNm": "전국"} for i in range(lo, hi)]
+
+
+def test_indicator_search_pages_to_completion():
+    """🔴 안 넘기면 10건에서 잘린다 — 총건수 필드가 없어 '짧은 쪽'으로만 끝을 안다."""
+    c = _PagedClient(total=113)
+    inds, meta = c.indicator_search(name="인구", max_records=1000)
+    assert len(inds) == 113, "전수를 회수해야 한다"
+    assert meta["pages"] == 2 and meta["complete"] is True
+    assert all(size > 10 for _p, size in c.pages_seen), "기본 10건에 기대면 안 된다"
+    assert len({i.jipyo_id for i in inds}) == 113, "쪽 사이에 겹침이 없어야 한다"
+
+
+def test_indicator_search_stops_cleanly_on_exact_multiple():
+    """정확히 배수로 떨어지면 한 쪽 더 불러 빈 쪽을 확인해야 조용히 안 잘린다."""
+    from kosis_mcp.config import IND_PAGE_SIZE
+    c = _PagedClient(total=IND_PAGE_SIZE * 2)
+    inds, meta = c.indicator_search(name="x", max_records=10 ** 6)
+    assert len(inds) == IND_PAGE_SIZE * 2
+    assert meta["pages"] == 2 and meta["complete"] is True
+
+
+def test_indicator_search_needs_a_query():
+    with pytest.raises(KosisError) as e:
+        KosisClient(api_key="x", throttle=0).indicator_search()
+    assert "jipyo_id" in str(e.value)
+
+
+def test_indicator_data_filters_locally_and_says_the_server_did_not():
+    """🔴 KOSIS 가 이 계열에서 시점 범위를 **거르지 않는다**(모드 스위치일 뿐).
+
+    서버가 걸러 줬다고 믿으면 요청하지 않은 구간을 받고도 모른다 — 그래서 직접
+    거르고 `server_filtered=False` 로 그 사실을 알린다.
+    """
+    c = _PagedClient(total=56)
+    vals, meta = c.indicator_data("13", start="1990", end="2000")
+    assert meta["server_filtered"] is False and "거르지 않습니다" in meta["filter_note"]
+    assert meta["available"] == 56, "서버는 전 구간을 준다"
+    assert all("1990" <= v.raw["prdDe"] <= "2000" for v in vals)
+    assert meta["dropped"] == 56 - len(vals) > 0
+    # 🔴 시점기준 모드를 켜는 플래그를 **반드시** 보낸다 — 빼면 err 30 이다.
+    #    값은 서버가 무시하므로 넓게 열어 두고 거르는 것은 이쪽 몫이다.
+    assert all("startPrdDe" in s and "endPrdDe" in s for s in c.sent)
+
+
+def test_indicator_data_upper_bound_includes_subperiods():
+    """`end='2020'`(연)이 `20203`(2020년 3분기)을 잘라내면 안 된다."""
+    from kosis_mcp.client import _prd_key
+    assert _prd_key("20203") <= _prd_key("2020", pad="9")
+    assert _prd_key("20210") > _prd_key("2020", pad="9")
+
+
+def test_indicator_data_recent_is_the_newest_n():
+    c = _PagedClient(total=56)
+    vals, meta = c.indicator_data("13", recent=5)
+    assert len(vals) == 5 and meta["recent"] == 5
+    assert [v.raw["prdDe"] for v in vals] == sorted(v.raw["prdDe"] for v in vals)
+    assert vals[-1].raw["prdDe"] == str(1970 + 55), "최신 쪽이어야 한다"
+
+
+def test_indicator_data_zero_is_not_a_failure():
+    class C(KosisClient):
+        def _get(self, url, params, *, what):
+            raise NoData("데이터가 존재하지 않습니다")
+    vals, meta = C(api_key="x", throttle=0).indicator_data("999")
+    assert vals == [] and meta["no_data"] is True and meta["total"] == 0
+    assert "kosis_indicator_search" in meta["note"]
+
+
+def test_indicator_export_uses_its_own_schema():
+    """계열이 셋이 됐다 — 0건일 때 종류를 kind 로 골라야 스키마가 안 섞인다."""
+    assert _table([], kind="indicator")[0][:2] == ["jipyo_id", "jipyo_nm"]
+    assert _table([], kind="indicator_value")[0] == ["jipyo_id", "jipyo_nm", "item",
+                                                     "prd_se", "period", "value"]
+    assert _table([], kind="observation")[0][:2] == ["tbl_id", "tbl_nm"]
+
+
+def test_indicator_tools_are_exposed_and_documented():
+    from kosis_mcp import server
+    import inspect, json as _json, pathlib as _pl, re as _re
+    for name in ("kosis_indicator_search", "kosis_indicator_data"):
+        fn = getattr(server, name)
+        assert inspect.getdoc(fn)
+    src = _pl.Path("src/kosis_mcp/server.py").read_text(encoding="utf-8")
+    tools = set(_re.findall(r"^def (kosis_\w+)", src, _re.M))
+    for p in ("mcpb/manifest.json", "packaging/binary/manifest.json"):
+        listed = {t["name"] for t in _json.loads(
+            _pl.Path(p).read_text(encoding="utf-8"))["tools"]}
+        assert listed == tools, f"{p} 의 도구 목록이 어긋난다"

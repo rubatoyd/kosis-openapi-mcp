@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import logging
+import re
 import time
 from typing import Any, Iterable, Sequence
 
@@ -20,6 +21,8 @@ from .config import (
     DEFAULT_THROTTLE,
     ENDPOINTS,
     ERROR_CODES,
+    IND_MAX_PAGES,
+    IND_PAGE_SIZE,
     MAX_CALLS_PER_TOOL_CALL,
     MAX_OBJ_LEVELS,
     META_TYPES,
@@ -29,7 +32,9 @@ from .config import (
     scrub,
     use_os_trust,
 )
-from .models import Observation, Table, observation_from_row, table_from_row
+from .models import (
+    Indicator, IndicatorValue, Observation, Table, indicator_from_row,
+    indicator_value_from_row, observation_from_row, table_from_row)
 from .parser import (
     ApiError, MissingObjLevel, NoData, ParseError, RateLimited, TooManyCells,
     parse_rows)
@@ -372,6 +377,122 @@ class KosisClient:
                                       end, meta, state, depth + 1)
             return left + right
 
+    # ── 통계주요지표 (규칙이 다른 계열) ──────────────────────────────────────
+    def _get_all_pages(self, url: str, params: dict, *, what: str) -> tuple[list[dict], dict]:
+        """🔴 **이 계열에만 페이징이 있고, 안 주면 10건에서 잘린다.**
+
+        이 API 의 다른 서비스에는 페이징이 없어 '주는 만큼이 전부'가 몸에 배는데
+        여기서만 규칙이 갈린다(실측: `jipyoNm=인구` 가 무지정 10건 / 전수 113건).
+
+        ⚠️ **총건수를 알려 주는 필드가 응답에 없다.** 끝을 아는 유일한 근거는
+           '마지막 쪽이 numOfRows 보다 짧다'뿐이다. 정확히 배수로 떨어지면 한 쪽을
+           더 불러 확인한다 — 안 그러면 딱 맞는 경우에만 조용히 잘린다.
+        """
+        rows: list[dict] = []
+        page, meta = 1, {"pages": 0, "page_size": IND_PAGE_SIZE, "complete": True}
+        while page <= IND_MAX_PAGES:
+            try:
+                got = self._get(url, {**params, "numOfRows": str(IND_PAGE_SIZE),
+                                      "pageNo": str(page)}, what=f"{what} p{page}")
+            except NoData:
+                # 🔴 **첫 쪽의 err 30 은 '진짜 0건'이다** — 삼키면 조용한 0건이 된다.
+                #    둘째 쪽부터의 err 30 은 '앞 쪽에서 끝났다'는 뜻이라 정상 종료다.
+                if page == 1:
+                    raise
+                break
+            meta["pages"] = page
+            rows += got
+            if len(got) < IND_PAGE_SIZE:
+                break                       # 짧은 쪽 = 마지막 쪽
+            page += 1
+        else:
+            meta["complete"] = False
+            meta["truncated_note"] = (
+                f"페이지 상한({IND_MAX_PAGES})에 닿아 멈췄습니다 — 전수가 아닐 수 있습니다. "
+                f"KOSIS_IND_MAX_PAGES 로 올릴 수 있습니다.")
+        return rows, meta
+
+    def indicator_search(self, name: str = "", jipyo_id: str = "",
+                         max_records: int = 50) -> tuple[list[Indicator], dict]:
+        """주요지표를 이름(또는 지표ID)으로 찾는다 — 수치를 받으려면 지표ID 가 필요하다."""
+        nm, jid = (name or "").strip(), (jipyo_id or "").strip()
+        if not (nm or jid):
+            raise KosisError("지표명(`name`) 또는 지표ID(`jipyo_id`) 중 하나는 주세요.")
+        params = {"method": "getList", "service": "4", "serviceDetail": "indList"}
+        params.update({"jipyoNm": nm} if nm else {"jipyoId": jid})
+        meta: dict[str, Any] = {"query": nm or jid, "service": "통계주요지표 목록조회"}
+        try:
+            rows, page_meta = self._get_all_pages(
+                ENDPOINTS["ind_list"], params, what=f"주요지표 목록({nm or jid})")
+        except NoData:
+            meta.update(total=0, fetched=0, no_data=True,
+                        note="조회 결과가 없습니다(err 30) — 오류가 아닙니다.")
+            return [], meta
+        meta.update(page_meta)
+        inds = [indicator_from_row(r) for r in rows]
+        meta["total"] = len(inds)
+        if len(inds) > max_records:
+            meta["truncated_note"] = f"{len(inds):,}건 중 {max_records:,}건만 돌려줍니다."
+            inds = inds[:max_records]
+        meta["fetched"] = len(inds)
+        return inds, meta
+
+    def indicator_data(self, jipyo_id: str, *, start: str = "", end: str = "",
+                       recent: int = 0) -> tuple[list[IndicatorValue], dict]:
+        """지표의 시점별 수치.
+
+        🔴 **서버가 시점 범위를 거르지 않는다.** `startPrdDe`/`endPrdDe` 는 값이
+           무시되고 '시점기준 모드를 켠다'는 플래그로만 작동한다 — `2020~2020` 을
+           줘도 `2015~2025` 를 줘도 똑같이 전 구간(1970~2025, 56건)이 온다(실측).
+           그래서 **전 구간을 받아 여기서 직접 거르고, 그 사실을 meta 로 알린다.**
+           서버가 걸러 줬다고 믿으면 요청하지 않은 구간을 받고도 모른다.
+
+        ⚠️ 시점 파라미터를 아예 빼면 `err 30` 이다 — 이 계열에서 err 30 은 '자료 없음'이
+           아니라 **'모드 미지정'** 일 수 있다. 그래서 항상 플래그를 넣어 보낸다.
+        """
+        jid = (jipyo_id or "").strip()
+        if not jid:
+            raise KosisError("지표ID(`jipyo_id`)가 필요합니다 — kosis_indicator_search 로 찾으세요.")
+        meta: dict[str, Any] = {
+            "jipyo_id": jid,
+            "server_filtered": False,
+            "filter_note": ("KOSIS 는 이 계열에서 시점 범위를 거르지 않습니다(플래그로만 "
+                            "작동) — 전 구간을 받아 이 도구가 직접 걸렀습니다."),
+        }
+        params = {"method": "getList", "service": "4", "serviceDetail": "indIdDetail",
+                  "jipyoId": jid,
+                  # 값은 무시되지만 **있어야** 시점기준 모드가 켜진다(실측).
+                  "startPrdDe": "1900", "endPrdDe": "2100"}
+        try:
+            rows, page_meta = self._get_all_pages(
+                ENDPOINTS["ind_detail"], params, what=f"주요지표 수치({jid})")
+        except NoData:
+            meta.update(total=0, fetched=0, no_data=True,
+                        note="이 지표에는 수치가 없습니다(err 30) — 오류가 아닙니다. "
+                             "지표ID 가 맞는지 kosis_indicator_search 로 확인하세요.")
+            return [], meta
+        meta.update(page_meta)
+        vals = [indicator_value_from_row(r) for r in rows]
+        meta["available"] = len(vals)
+
+        s, e = (start or "").strip(), (end or "").strip()
+        if s or e:
+            keep = [v for v in vals
+                    if (not s or _prd_key(v.raw.get("prdDe")) >= _prd_key(s))
+                    and (not e or _prd_key(v.raw.get("prdDe")) <= _prd_key(e, pad="9"))]
+            meta["filtered_by"] = {"start": s or None, "end": e or None}
+            meta["dropped"] = len(vals) - len(keep)
+            vals = keep
+        elif recent:
+            # 최신 N개 — 서버의 rn/srvRn 대신 받은 것을 정렬해 자른다(동작이 확정적이다).
+            vals = sorted(vals, key=lambda v: _prd_key(v.raw.get("prdDe")))[-int(recent):]
+            meta["recent"] = int(recent)
+        meta["total"] = meta["fetched"] = len(vals)
+        if not vals and meta["available"]:
+            meta["note"] = (f"지표에는 {meta['available']}개 시점이 있지만 요청한 범위에 "
+                            f"해당하는 값이 없습니다 — 범위를 넓혀 보세요.")
+        return vals, meta
+
     # ── 상태 ─────────────────────────────────────────────────────────────────
     def status(self) -> dict:
         info: dict[str, Any] = {
@@ -468,3 +589,15 @@ def _next_period(period: str, prd_se: str) -> str:
             y, m = y + 1, 1
         return f"{y:04d}{m:02d}"
     return str(int(s) + 1)
+
+
+def _prd_key(prd: Any, *, pad: str = "0") -> str:
+    """시점 비교용 키 — 자릿수가 달라도 순서가 맞게 채운다.
+
+    ⚠️ 주요지표의 `prdDe` 는 '2025' 로도 '2025년'·'20253' 으로도 온다. 숫자만 남겨
+       비교한다.
+    ⚠️ **상한은 9로 채운다.** 0으로 채우면 `end="2020"`(연)이 `20203`(2020년 3분기)을
+       잘라낸다 — 사용자는 '2020년까지'라고 말했는데 그 해 자료가 사라진다.
+    """
+    s = re.sub(r"\D", "", str(prd or ""))
+    return s.ljust(8, pad)[:8] if s else ""

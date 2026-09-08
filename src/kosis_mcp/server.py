@@ -93,6 +93,15 @@ def kosis_guide() -> dict:
                         "서버가 준 만큼이 전부다. (통계주요지표 계열만 pageNo·numOfRows 를 "
                         "받고 안 주면 10건에서 잘리는데, 이 도구들은 그 계열을 쓰지 않는다.)",
         },
+        "통계주요지표": {
+            "무엇": "통계표(TBL_ID)가 아니라 지표(statJipyoId)를 다루는 별도 계열. "
+                    "kosis_indicator_search 로 찾고 kosis_indicator_data 로 값을 받는다.",
+            "🔴 페이징": "이 계열에만 pageNo·numOfRows 가 있고 안 주면 10건에서 잘린다 — "
+                         "도구가 끝까지 넘겨 전수를 회수한다(meta.pages).",
+            "🔴 시점 무시": "startPrdDe/endPrdDe 가 범위를 거르지 않는다(모드 스위치일 뿐). "
+                            "도구가 전 구간을 받아 직접 거르고 meta.server_filtered 로 알린다.",
+            "⚠️ err 30": "이 계열에서는 '자료 없음'이 아니라 '모드 미지정'일 수 있다.",
+        },
         "분류축": {
             "규칙": "요청의 objL 개수가 표의 분류축 개수와 **정확히** 맞아야 한다 — "
                     "모자라면 err 20 '(objL)', 넘치면 err 21. 그래서 '전부 보내기'는 통하지 않는다.",
@@ -293,6 +302,59 @@ def kosis_collect(org_id: str, tbl_id: str, prd_se: str, out_dir: str,
     paths = export(obs, formats or ["xlsx", "json"], out_dir, name,
                    kind="observation")
     return {"saved": paths, "count": len(obs), "meta": meta}
+
+
+@mcp.tool(annotations=_READ)
+@_safe
+def kosis_indicator_search(name: str = "", jipyo_id: str = "",
+                           max_records: int = 30) -> dict:
+    """**주요지표**를 이름으로 찾는다 — 통계표와는 다른 계열이다.
+
+    KOSIS 는 통계표(TBL_ID) 말고 **지표(statJipyoId)** 계열을 따로 둔다(합계출산율,
+    추계인구 …). 표 구조를 몰라도 바로 값을 볼 수 있는 대신, 지표로 큐레이션된 것만
+    있다. 표 단위로 파고들 거라면 `kosis_search` 를 쓴다.
+
+    🔴 이 계열에만 페이징이 있고 안 주면 서버가 10건에서 자른다 — 이 도구가 **끝까지
+       넘겨 전수를 회수**한다(`meta.pages` 에 몇 쪽을 읽었는지 실린다).
+
+    Args:
+        name: 지표명(예: '출산율', '인구').
+        jipyo_id: 지표ID 로 직접 찾을 때(둘 중 하나는 필요).
+        max_records: 돌려줄 최대 건수.
+    """
+    if not get_api_key():
+        return _NO_KEY
+    inds, meta = KosisClient().indicator_search(
+        name=name, jipyo_id=jipyo_id, max_records=max_records)
+    return {
+        "indicators": [{**i.to_row(), "scoring_text": i.scoring_text()} for i in inds],
+        "meta": meta,
+        "다음_단계": "지표를 골랐으면 그 jipyo_id 로 kosis_indicator_data 를 부르세요.",
+    }
+
+
+@mcp.tool(annotations=_READ)
+@_safe
+def kosis_indicator_data(jipyo_id: str, start: str = "", end: str = "",
+                         recent: int = 0) -> dict:
+    """주요지표의 **시점별 수치**를 받는다.
+
+    🔴 **KOSIS 가 이 계열에서는 시점 범위를 거르지 않는다.** `startPrdDe`/`endPrdDe` 는
+       값이 무시되고 모드 스위치로만 작동해서, 무엇을 주든 전 구간이 온다(실측).
+       그래서 이 도구가 전 구간을 받아 **직접 거르고**, 그 사실을 `meta.server_filtered`
+       (=false)와 `meta.filter_note` 로 알린다 — 서버가 걸러 줬다고 믿으면 요청하지
+       않은 구간을 받고도 모른다.
+
+    Args:
+        jipyo_id: 지표ID(`kosis_indicator_search` 로 찾는다).
+        start, end: 시점 범위(예: '2015'~'2025'). 비우면 전 구간.
+        recent: 최신 N개 시점만(start/end 를 안 줬을 때).
+    """
+    if not get_api_key():
+        return _NO_KEY
+    vals, meta = KosisClient().indicator_data(
+        jipyo_id, start=start, end=end, recent=recent)
+    return {"values": [v.to_row() for v in vals], "meta": meta}
 
 
 def _env_port(name: str) -> int | None:

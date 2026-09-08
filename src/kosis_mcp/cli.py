@@ -167,6 +167,42 @@ def cmd_collect(args) -> int:
     return 0
 
 
+def cmd_indicator(args) -> int:
+    inds, meta = KosisClient().indicator_search(
+        name=args.name, jipyo_id=args.id, max_records=args.max_records)
+    if args.json:
+        _dump({"indicators": [i.to_row() for i in inds], "meta": meta})
+        return 0
+    print(f"'{meta['query']}' — {meta.get('total', 0):,}건 "
+          f"(페이지 {meta.get('pages', 0)}쪽 회수)")
+    for i in inds:
+        print(f"  {i.jipyo_id:<8} {i.jipyo_nm[:40]:<40} {i.unit:<8} "
+              f"{i.period_from}~{i.period_to} ({i.periods}시점) {i.area}")
+    for k in ("truncated_note", "note"):
+        if meta.get(k):
+            print(f"\n  [!] {meta[k]}")
+    return 0
+
+
+def cmd_indicator_data(args) -> int:
+    vals, meta = KosisClient().indicator_data(
+        args.id, start=args.start, end=args.end, recent=args.recent)
+    if args.json:
+        _dump({"values": [v.to_row() for v in vals], "meta": meta})
+        return 0
+    print(f"{meta['total']:,}건 · 지표 전체 {meta.get('available', 0):,}시점 "
+          f"· 페이지 {meta.get('pages', 0)}쪽")
+    if not meta.get("server_filtered", True):
+        print(f"  [!] {meta['filter_note']}")
+    for v in vals[:args.limit]:
+        print(f"  {v.period:<10} {v.item[:16]:<16} {v.value:>14}")
+    if meta["total"] > args.limit:
+        print(f"  … ({meta['total']:,}건 중 {args.limit}건 표시)")
+    if meta.get("note"):
+        print(f"  [!] {meta['note']}")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="kosis", description="KOSIS 공유서비스 CLI")
     p.add_argument("--version", action="version",
@@ -222,6 +258,23 @@ def build_parser() -> argparse.ArgumentParser:
     d.add_argument("--limit", type=int, default=20)
     d.add_argument("--json", action="store_true")
     d.set_defaults(func=cmd_data)
+
+    # ── 통계주요지표 (규칙이 다른 계열 — docs §7) ────────────────────────────
+    i = sub.add_parser("indicator", help="주요지표 찾기(통계표와 다른 계열)")
+    i.add_argument("name", nargs="?", default="", help="지표명(예: 출산율)")
+    i.add_argument("--id", default="", help="지표ID 로 직접 찾기")
+    i.add_argument("--max-records", type=int, default=30)
+    i.add_argument("--json", action="store_true")
+    i.set_defaults(func=cmd_indicator)
+
+    iv = sub.add_parser("indicator-data", help="주요지표의 시점별 수치")
+    iv.add_argument("--id", required=True, help="지표ID (indicator 로 찾는다)")
+    iv.add_argument("--start", default="")
+    iv.add_argument("--end", default="")
+    iv.add_argument("--recent", type=int, default=0)
+    iv.add_argument("--limit", type=int, default=20)
+    iv.add_argument("--json", action="store_true")
+    iv.set_defaults(func=cmd_indicator_data)
 
     c = sub.add_parser("collect", help="수치를 파일로 저장")
     data_args(c)

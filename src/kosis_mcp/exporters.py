@@ -20,7 +20,9 @@ import sqlite3
 from pathlib import Path
 from typing import Sequence
 
-from .models import COLUMNS, OBS_COLUMNS, Observation, Table
+from .models import (
+    COLUMNS, IND_COLUMNS, IND_VALUE_COLUMNS, OBS_COLUMNS,
+    Indicator, IndicatorValue, Observation, Table)
 
 _RESERVED = {"CON", "PRN", "AUX", "NUL",
              *(f"COM{i}" for i in range(1, 10)), *(f"LPT{i}" for i in range(1, 10))}
@@ -58,6 +60,24 @@ def extra_columns(records: Sequence) -> list[str]:
     return list(seen)
 
 
+_BASE_COLUMNS = {"table": COLUMNS, "observation": OBS_COLUMNS,
+                 "indicator": IND_COLUMNS, "indicator_value": IND_VALUE_COLUMNS}
+_KINDS = ((Observation, "observation"), (IndicatorValue, "indicator_value"),
+          (Indicator, "indicator"), (Table, "table"))
+
+
+def _detect_kind(records: Sequence) -> str:
+    """첫 원소로 종류를 짐작한다 — **0건이면 알 수 없어서** 'table' 로 떨어진다.
+
+    그래서 부르는 쪽이 `kind` 를 주는 것이 원칙이다(0건 내보내기가 통계표 스키마로
+    나가던 결함이 여기서 나왔다). 이 함수는 그것을 안 준 옛 경로의 안전망일 뿐이다.
+    """
+    for cls, name in _KINDS:
+        if records and isinstance(records[0], cls):
+            return name
+    return "table"
+
+
 def _table(records: Sequence, *, kind: str | None = None) -> tuple[list[str], list[dict]]:
     """열 머리와 행들. 관측치와 통계표를 둘 다 받는다.
 
@@ -69,15 +89,16 @@ def _table(records: Sequence, *, kind: str | None = None) -> tuple[list[str], li
        쪽이 스키마를 오해한다. 그래서 부르는 쪽이 `kind` 로 알려 준다.
        0건은 실패가 아니라 사실이므로(err 30) 파일 자체는 정상적으로 쓴다.
     """
-    if kind == "observation" or (kind is None and records
-                                 and isinstance(records[0], Observation)):
+    kind = kind or _detect_kind(records)
+    if kind == "observation":
+        # 분류 축은 표마다 다르다 — 실제로 나온 분류 이름을 열로 붙인다.
         seen: dict[str, None] = {}
         for r in records:
-            for k in r.classes:
+            for k in getattr(r, "classes", {}):
                 seen.setdefault(k, None)
         base = list(OBS_COLUMNS) + list(seen)
     else:
-        base = list(COLUMNS)
+        base = list(_BASE_COLUMNS.get(kind, COLUMNS))
 
     # 🔴 관측치도 미매핑 필드를 승격한다 — 여기가 빠져 있어서 분류 코드(C1·C2)와
     #    ORG_ID 가 csv·xlsx 에서 사라지고 있었다. json·sqlite 만 raw 로 살아남았다.

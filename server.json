@@ -2,7 +2,7 @@
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "io.github.rubatoyd/kosis-openapi-mcp",
   "description": "Korean official statistics (KOSIS) — tables, metadata and observations",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "repository": {
     "url": "https://github.com/rubatoyd/kosis-openapi-mcp",
     "source": "github"
@@ -11,8 +11,8 @@
   "packages": [
     {
       "registryType": "mcpb",
-      "identifier": "https://github.com/rubatoyd/kosis-openapi-mcp/releases/download/v0.1.0/kosis-openapi-mcp.mcpb",
-      "version": "0.1.0",
+      "identifier": "https://github.com/rubatoyd/kosis-openapi-mcp/releases/download/v0.2.0/kosis-openapi-mcp.mcpb",
+      "version": "0.2.0",
       "transport": {
         "type": "stdio"
       },

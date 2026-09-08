@@ -38,8 +38,9 @@ src/kosis_mcp/
   parser.py     # JSON 파싱 · 오류 봉투 판별 · jsonVD 누락 진단
   client.py     # 호출·재시도·🔴 4만 셀 자동 분할
   exporters.py  # xlsx/csv/json/sqlite (분류 축이 가변이라 열도 가변)
-  server.py     # MCP 도구 9종
+  server.py     # MCP 도구 11종(통계표 9 + 주요지표 2)
   cli.py        # status/guide/search/list/meta/explain/data/collect
+                #  + indicator/indicator-data (주요지표 — 규칙이 다른 계열)
 scripts/probe_api.py   # ★ 라이브 탐침 — 인증·모양·상한
 tests/fixtures/        # ★ 2026-09-08 의 진짜 응답
 ```
@@ -108,7 +109,9 @@ base64 로 보이지만 **발급값 그대로** 보내야 한다. 풀어서 보�
 ⚠️ 여기서 `err 30` 은 '자료 없음'이 아니라 **모드 미지정**일 수 있다. `rn` 은 `srvRn` 과 함께.
 ⚠️ 수치 칸이 `DT` 가 아니라 **`val`**, 시점이 `PRD_DE` 가 아니라 **`prdDe`** (소문자 카멜).
    통계자료 파서를 재사용하면 전부 빈 값이 된다.
-→ 아직 **구현하지 않았다.** 붙일지, 붙인다면 어느 범위로 할지는 지시 대기.
+→ **2종만 붙였다**(검색·수치). 전제 둘을 코드가 감당한다 — 페이징 전수 회수,
+   시점 로컬 필터 + `server_filtered=false` 고지. ⚠️ 첫 쪽의 err 30 은 '진짜 0건'이라
+   삼키면 안 된다(둘째 쪽부터는 정상 종료 신호다 — 회귀로 고정).
 
 ### (J) 문서와 다른 것들
 - `parentListId` 는 **필수가 아니다** — 생략하면 최상위 목록이 온다(트리의 입구).
@@ -140,7 +143,7 @@ base64 로 보이지만 **발급값 그대로** 보내야 한다. 풀어서 보�
 - **커밋 메시지 한국어, Claude 서명 금지.**
 
 ## 6. 상태 (2026-09-08 검토 반영)
-- ✅ **v0.1.0 코어** — config·models·parser·client·exporters·server·cli + CI. 회귀 **63건**.
+- ✅ **v0.1.0 코어** — config·models·parser·client·exporters·server·cli + CI. 회귀 **73건**.
   라이브 검증: status 왕복 · 통합검색(사교육비 20건) · 목록 트리 최상위 30건 ·
   메타 ITM 34건 · 통계자료 868행 · **err 31 자동 분할로 52,587행**.
 - 🔬 **문서에 없는 것 넷을 실측으로 찾았다**(§4 A·B·C·**F**). (B)는 문서만 보고는 절대
@@ -154,7 +157,8 @@ base64 로 보이지만 **발급값 그대로** 보내야 한다. 풀어서 보�
   `export(kind=...)` 로 고정.
 - ✅ **v0.1.0 릴리스 완료** — GitHub Release(자산 4종) + MCP 레지스트리
   `io.github.rubatoyd/kosis-openapi-mcp` 0.1.0 발행.
-- ✅ 통계주요지표 계열 **검토 완료**(§4 I) — 규격·함정 전부 실측해 docs §7 에 남겼다.
-  구현은 하지 않았다.
+- ✅ 통계주요지표 **2종 구현**(§4 I) — `kosis_indicator_search`·`kosis_indicator_data`.
+  페이징 자동 전수 회수 + 서버가 안 거르는 시점을 대신 거르고 그 사실을 알린다.
+  하위 6종 중 나머지 4종은 이 둘의 부분집합이거나 통계설명과 겹쳐 붙이지 않았다.
 - ⏭️ 다음: 통계주요지표를 붙일지 결정(붙인다면 지표검색 + 지표수치 2종 권장 —
   페이징 자동 회수와 시점 무시 대응이 전제다).

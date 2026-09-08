@@ -272,3 +272,98 @@ def observation_from_row(r: dict) -> Observation:
         updated=normalize_period(c("LST_CHN_DE")),
         classes=classes, raw=dict(r),
     )
+
+
+# ── 통계주요지표 ────────────────────────────────────────────────────────────
+#
+# 🔴 **통계표와 다른 계열이다.** 인용·수집 단위가 통계표(TBL_ID)가 아니라
+#    지표(statJipyoId)이고, 응답 키의 대소문자 규칙까지 다르다:
+#
+#        통계자료   PRD_DE · DT · ITM_NM     (대문자 스네이크)
+#        주요지표   prdDe  · val · itmNm     (소문자 카멜)
+#
+#    통계자료의 파서를 그대로 재사용하면 **전부 빈 값**이 된다. 그래서 따로 둔다.
+IND_COLUMNS = ["jipyo_id", "jipyo_nm", "unit", "area", "prd_se_nm",
+               "period_from", "period_to", "periods", "latest_period", "url"]
+
+
+@dataclass
+class Indicator:
+    """주요지표 하나 — 수치를 받으려면 `jipyo_id` 가 필요하다."""
+    jipyo_id: str = ""
+    jipyo_nm: str = ""
+    unit: str = ""
+    area: str = ""              # areaTypeName — 전국·시도 등
+    prd_se_nm: str = ""         # 수록주기명(년·분기…) — 코드가 아니라 이름으로 온다
+    period_from: str = ""
+    period_to: str = ""
+    periods: str = ""           # rn — 수록시점 개수
+    latest_period: str = ""     # prdDe
+    url: str = ""
+    raw: dict[str, Any] = field(default_factory=dict)
+
+    def to_row(self) -> dict[str, str]:
+        return {c: str(getattr(self, c, "") or "") for c in IND_COLUMNS}
+
+    def unmapped(self) -> dict[str, str]:
+        used = {"statJipyoId", "statJipyoNm", "unit", "areaTypeName", "prdSeName",
+                "strtPrdDe", "endPrdDe", "rn", "prdDe", "repJipyoUrl"}
+        return {k: clean_text(v) for k, v in self.raw.items() if k not in used}
+
+    def scoring_text(self) -> str:
+        bits = [self.jipyo_nm, self.unit, self.area, self.prd_se_nm]
+        return " · ".join(b for b in dict.fromkeys(bits) if b)
+
+
+def indicator_from_row(r: dict) -> Indicator:
+    def v(*names: str) -> str:
+        for n in names:
+            if r.get(n) not in (None, ""):
+                return clean_text(r[n])
+        return ""
+    return Indicator(
+        jipyo_id=v("statJipyoId", "jipyoId"),
+        jipyo_nm=v("statJipyoNm", "jipyoNm"),
+        unit=v("unit"),
+        area=v("areaTypeName"),
+        prd_se_nm=v("prdSeName"),
+        period_from=v("strtPrdDe"),
+        period_to=v("endPrdDe"),
+        periods=v("rn"),
+        latest_period=v("prdDe"),
+        url=v("repJipyoUrl", "explainUrl"),
+        raw=dict(r),
+    )
+
+
+IND_VALUE_COLUMNS = ["jipyo_id", "jipyo_nm", "item", "prd_se", "period", "value"]
+
+
+@dataclass
+class IndicatorValue:
+    """지표의 수치 한 칸. 관측치와 마찬가지로 **문헌이 아니라 위치**다."""
+    jipyo_id: str = ""
+    jipyo_nm: str = ""
+    item: str = ""              # itmNm — 지역 등 세부 항목
+    prd_se: str = ""
+    period: str = ""
+    value: str = ""             # 🔴 원본 키가 DT 가 아니라 `val` 이다
+    raw: dict[str, Any] = field(default_factory=dict)
+
+    def to_row(self) -> dict[str, str]:
+        return {c: str(getattr(self, c, "") or "") for c in IND_VALUE_COLUMNS}
+
+    def unmapped(self) -> dict[str, str]:
+        used = {"statJipyoId", "statJipyoNm", "itmNm", "prdSe", "prdDe", "val"}
+        return {k: clean_text(v) for k, v in self.raw.items() if k not in used}
+
+
+def indicator_value_from_row(r: dict) -> IndicatorValue:
+    def c(k: str) -> str:
+        return clean_text(r.get(k))
+    return IndicatorValue(
+        jipyo_id=c("statJipyoId"), jipyo_nm=c("statJipyoNm"),
+        item=c("itmNm"), prd_se=c("prdSe"),
+        period=normalize_period(c("prdDe"), c("prdSe")),
+        value=c("val"), raw=dict(r),
+    )

@@ -44,7 +44,21 @@ ENDPOINTS = {
     "expl":    f"{BASE}/statisticsExplData.do",  # 통계설명
     "explain": "https://kosis.kr/openApi/StatsExplain.do",   # ⚠️ openApi (대문자 A)
     "search":  f"{BASE}/statisticsSearch.do",    # KOSIS 통합검색
+
+    # ── 통계주요지표 계열(개발가이드 §2.7) — **규칙이 다르다**. docs §7 참조.
+    #    통계표(TBL_ID)가 아니라 지표(statJipyoId)를 다루고, 이 계열만 페이징이 있다.
+    #    하위 6종 중 둘만 쓴다(나머지는 이 둘의 부분집합이거나 설명자료라
+    #    statisticsExplData 와 겹친다):
+    "ind_list":   f"{BASE}/indListSearchRequest.do",       # 지표 목록(지표명·고유번호별)
+    "ind_detail": f"{BASE}/indIdDetailSearchRequest.do",   # 지표 수치(시점별 값)
 }
+
+# 🔴 통계주요지표 **전용** 페이징. 이 API 의 다른 서비스에는 페이징이 없어서
+#    "주는 만큼이 전부"가 몸에 배는데, 여기서만 규칙이 갈린다 —
+#    **`numOfRows` 를 안 주면 서버가 10건만 준다**(실측). 총건수를 알려 주는 필드도
+#    없어서 전수 여부는 '마지막 쪽이 numOfRows 보다 짧다'로만 판단한다.
+IND_PAGE_SIZE = int(os.environ.get("KOSIS_IND_PAGE_SIZE", "100"))
+IND_MAX_PAGES = int(os.environ.get("KOSIS_IND_MAX_PAGES", "50"))
 
 # 통계목록의 서비스뷰 코드 (개발가이드 p19). 📄 문서 기준 — 실측으로 확인한 것은 표시한다.
 VIEW_CODES = {
