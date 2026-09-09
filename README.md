@@ -7,11 +7,11 @@
 [![Downloads](https://img.shields.io/github/downloads/rubatoyd/kosis-openapi-mcp/total?label=downloads)](https://github.com/rubatoyd/kosis-openapi-mcp/releases)
 
 <!-- usage:start -->
-> 📈 **사용량** — 최근 14일 조회 **0**회(고유 0) · 클론 **0**회(고유 0) · 릴리스 자산 누적 다운로드 **3**
+> 📈 **사용량** — 최근 14일 조회 **0**회(고유 0) · 클론 **0**회(고유 0) · 릴리스 자산 누적 다운로드 **10**
 >
 > ![일별 클론·조회 추이](docs/usage.svg)
 >
-> <sub>2026-09-08 자동 갱신 · 전체 이력은 [`docs/usage.csv`](docs/usage.csv). GitHub 트래픽 통계는 14일 창만 제공하므로 이 저장소가 매일 찍어 누적한다.</sub>
+> <sub>2026-09-09 자동 갱신 · 전체 이력은 [`docs/usage.csv`](docs/usage.csv). GitHub 트래픽 통계는 14일 창만 제공하므로 이 저장소가 매일 찍어 누적한다.</sub>
 <!-- usage:end -->
 
 **KOSIS(국가통계포털) 공유서비스 OpenAPI** 를 검색·수집하는 MCP 서버 + CLI.
